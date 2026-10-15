@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 QuincyLeo
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+.temp/
+__pycache__/
+*.pyc
+.DS_Store

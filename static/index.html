@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<!-- SPDX-FileCopyrightText: 2026 QuincyLeo -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>照片加边框</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>window.FRAMER_TOKEN = "__TOKEN__";</script>
+</head>
+<body>
+<div class="app">
+  <main id="stage" class="stage">
+    <div id="dropzone" class="dropzone">
+      <div class="dz-inner">
+        <p class="dz-title">把照片拖进来</p>
+        <p class="dz-sub">或 <button id="pick-file" class="link">选择文件…</button></p>
+        <p class="dz-note">支持 JPEG / PNG / TIFF / WebP / AVIF · 原图像素不会被重新采样</p>
+      </div>
+    </div>
+    <figure id="viewport" class="viewport hidden">
+      <img id="preview" alt="预览">
+      <figcaption id="canvas-size" class="canvas-size"></figcaption>
+    </figure>
+    <div id="spinner" class="spinner hidden"></div>
+  </main>
+
+  <aside class="panel">
+    <header class="panel-head">
+      <h1>照片加边框</h1>
+      <div class="head-actions">
+        <button id="pick-file-2" class="btn btn-ghost">打开…</button>
+        <button id="reset" class="btn btn-ghost" title="恢复默认参数">重置</button>
+      </div>
+    </header>
+
+    <section id="meta" class="meta hidden"></section>
+
+    <div class="scroll">
+      <details open class="group">
+        <summary>外观</summary>
+        <div class="rows" id="g-look"></div>
+      </details>
+
+      <details open class="group">
+        <summary>文字</summary>
+        <div class="rows" id="g-text"></div>
+      </details>
+    </div>
+
+    <footer class="panel-foot">
+      <div class="rows tight" id="g-export"></div>
+      <button id="export" class="btn btn-primary" disabled>导出当前照片</button>
+      <div class="batch">
+        <button id="batch" class="btn btn-ghost" disabled>批量处理整个文件夹…</button>
+        <div id="progress" class="progress hidden">
+          <div class="bar"><div id="bar-fill" class="bar-fill"></div></div>
+          <div class="progress-text"><span id="progress-label"></span>
+            <button id="batch-cancel" class="link">取消</button></div>
+        </div>
+      </div>
+      <p id="status" class="status"></p>
+    </footer>
+  </aside>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

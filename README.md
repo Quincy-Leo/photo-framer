@@ -1,0 +1,182 @@
+<!-- SPDX-FileCopyrightText: 2026 QuincyLeo -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+# photo-framer
+
+[English](README.en.md) · 简体中文
+
+为照片添加一个美观的信息展示边框。画质保持完全无损。
+
+![界面](docs/ui.png)
+
+六个滑块：边框宽度、圆角、阴影、模糊度、字号、文字明暗。文字内容固定为厂商型号 + 拍摄参数，可改可切一行/两行。照片的像素、色彩描述和 EXIF 原样保留。
+
+出图效果，一行和两行各一张（为了放进 README 缩小过，实际导出是 6706 × 4793 和 6706 × 5065）：
+
+![一行](docs/example.jpg)
+
+![两行](docs/example-two-line.jpg)
+
+## 启动
+
+```bash
+cd photo-framer
+./start.command              # 或 python3 server.py
+./start.command photo.jpg    # 直接打开某张照片
+```
+
+浏览器会自动打开 `http://127.0.0.1:8787/?t=…`。关掉终端即退出。
+
+只依赖 Pillow（≥ 10）。`start.command` 会在缺失时自动装。目前的字体路径与原生文件选择器是 macOS 专用的，换平台需要改 `framer.py` 顶部的字体常量和 `server.py` 里的 `native_pick()`。
+
+浏览器预览使用长边 1024 的小图 JPEG 代理（约 40 ms，拖滑块跟手），导出永远从磁盘上的原图重新渲染。
+
+## 已知边界
+
+- **16-bit TIFF 会被截成 8-bit。** Pillow 读 16 bit/通道的 TIFF 时直接丢低字节，这是上游限制。工具会在信息栏用黄字提示。8-bit 的 JPEG/PNG/WebP 不受影响。
+- **HEIC/HEIF 需要额外装一个包**：`pip3 install --user pillow-heif`，装完重启即可识别，不装会给出明确提示。
+- **原图没有 ICC 时**按 sRGB 处理（输出也不写 ICC）。信息栏会标出来。
+- **照片的 EXIF 被剥掉时**（很多修图 App 和分享渠道会把 Make/Model/光圈快门全删掉）文字自动填充会是空的，信息栏用黄字提示，手填即可。
+- 边框、文字、阴影的颜色是直接写在原图的数值空间里的。如果原图是 Display P3，白就是 P3 白 —— 想要「和照片同一个世界」的白，这正是想要的行为。
+
+## 参数
+
+六个滑块，外加文字内容和一个排版开关。更细的比例已经按视觉效果调好，不暴露出来。
+
+| 控件 | 范围 | 说明 |
+|---|---|---|
+| 边框宽度 | 0.1 – 5.0 ×，步进 0.1 | 1.0 是调好的基础宽度（短边的 5.6%） |
+| 圆角 | 0 – 100 | 0 是直角 |
+| 阴影 | 0 – 100 | 0 是没有阴影；浓度和扩散一起走 |
+| 模糊度 | 3 – 100，默认 10 | 高斯模糊；刻度 ×0.12% 就是半径占短边的比例 |
+| 字号 | 0.5 – 2.5 × | 两行一起缩放；1.0 是调好的基础字号 |
+| 文字明暗 | 0 – 100，或自动 | 见下 |
+
+参数会存在 localStorage，下次打开还在。`重置` 回到默认。
+
+### 边框
+
+上、左、右三边等宽。下边框 = 文字高度 + 一个边框宽度，这一个边框宽度平分到文字上下，所以**文字在下边框里垂直居中，而文字上下的留白加起来正好等于其他三边的宽度**。
+
+字号调大、或从两行切到一行，下边框会自动跟着变，不用手动配合。
+
+以上长度数据都按照照片规格自动计算调整。
+
+### 背景模糊
+
+背景是原图自己放大 1.15 倍后居中裁切的版本，做**高斯模糊**。滑块刻度 × 0.12% 就是高斯半径占照片短边的比例 —— 默认 10 对应 1.2%（3450×2760 的照片约 33 px），下限 3 对应 0.36%。
+
+## 文字
+
+固定两组内容：**厂商 型号**（之间两个空格），和**焦距 | 光圈 | 快门 | ISO**（用 `|` 分隔）。曝光补偿不为 0 时会自动再接一项 `+0.3EV`；为 0 就不显示。默认一行，也可以切两行：
+
+```
+一行（默认）  NIKON  z5_2    35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
+
+两行              NIKON  z5_2
+       35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
+```
+
+一行模式下厂商型号仍然更大更粗，和参数之间用空白分组而不是再加一根竖线，两组共享同一条基线。那段空白约等于参数字体的 5.7 个空格宽，宽到足以读成"分组"而不是"词距"。
+
+厂商和型号**按 EXIF 里的原样显示**，不做大小写转换：EXIF 写 `Nikon` 就显示 `Nikon`，写 `FUJIFILM` 就显示 `FUJIFILM`。只有两处清理：厂商名里的公司后缀（`NIKON CORPORATION` → `NIKON`），和型号里重复的品牌前缀（`FUJIFILM X-T5` → `X-T5`）。
+
+### 字号
+
+字号 = 照片短边 × 一个百分比 × 字号倍率，不是固定像素。一行和两行各有自己调好的比例：
+
+| | 主标题 | 副标题 |
+|---|---|---|
+| 一行（默认） | 短边 × 3.38% | 短边 × 2.93% |
+| 两行 | 短边 × 4.42% | 短边 × 2.86% |
+
+换算成实际像素（一行、字号 1.0×）：
+
+| 照片短边 | 主标题 | 副标题 |
+|---|---|---|
+| 2000 px | 68 px | 59 px |
+| 4160 px | 141 px | 122 px |
+| 6000 px | 203 px | 176 px |
+
+字距、行距、下边框高度都跟着字号走，所以手机直出和中画幅拍的片子套同一套参数，文字占画面的比例是一样的。这也正是浏览器里那张小图预览能准确代表成品的原因 —— 有断言在守（`the caption keeps the same share of the canvas at any resolution`）。
+
+### 中文
+
+SF Pro 不含中文字形，所以标题里打中文会是一排方块。工具会逐字检测主字体有没有这个字形（渲染出来跟一个任何字体都没定义的码位比对），缺的字自动换 Hiragino Sans GB（W3/W6 对应常规/半粗），中英混排时两种字形共享同一条基线。
+
+### 字距
+
+统一加了 0.03em。Pillow 本身没有字距参数，所以是逐字排的，但纯西文时每个字的位置仍然取自整串的 `getlength`，字体自己的 kerning 没有被压平。
+
+### 文字明暗
+
+默认自动：取文字正下方那块背景的平均亮度，暗背景给**纯白**，亮背景给**纯黑**（阈值是 luma 0.55）。文字背后还有一层反向的柔和衬底（白字配暗衬、黑字配亮衬），所以压在细碎的模糊背景上也读得清。
+
+拖动滑块即接管为手动，可以停在任意灰度；点右边的 `自动` 切回。自动模式下滑块会停在它选的那一端，所以看得见它判断成了什么。
+
+## 输出位置
+
+**单张导出交给浏览器下载**，落到浏览器自己的下载目录，工具不需要问你要存哪儿、也没有输出目录这个输入框。文件名是 `<原名>_framed.png`。
+
+传给浏览器的是渲染好的字节流，`Blob` 下载是逐字节拷贝 —— 中间没有任何一步重新编码。
+
+**批量**是唯一写磁盘的路径：输出到所选文件夹下的 `framed/`，同名文件自动加 `-2`、`-3` 后缀，不覆盖。
+
+## 批量
+
+`批量处理整个文件夹…` 用当前参数处理一个目录下所有图片。确认框会列出来源、输出目录、格式，并明确说明文字是跟 EXIF 还是用手改的那份。ICC 和 EXIF 逐张保留。处理中可以取消。
+
+## 快捷键
+
+`⌘O` 打开照片 · `⌘S` 导出当前照片 · 照片也可以直接拖进窗口
+
+## 测试
+
+```bash
+python3 tests/test_lossless.py   # 渲染内核：逐位一致性、边框规则、EXIF/EV、字距、中文回退、自动配色、极端参数
+python3 tests/test_server.py     # HTTP 层：鉴权、预览、下载式导出、批量、keep-alive 分帧
+```
+
+`test_lossless.py` 用高频噪声图做素材 —— 任何一次重采样都会立刻暴露。边框那条规则（文字上下留白之和 == 其他三边宽度）、模糊下限、0 EV 不显示、自动配色只给纯黑或纯白、字号按比例缩放、中文走回退字体，都有断言守着。两个脚本都不需要外部素材，自己造图。
+
+## 文件
+
+| | |
+|---|---|
+| `framer.py` | 渲染内核。纯 Pillow，可单独 import 用在脚本里 |
+| `server.py` | 本地 HTTP 服务，只监听 127.0.0.1，所有 `/api/` 调用校验一次性 token |
+| `static/` | 界面 |
+| `docs/` | README 用的界面截图和出图示例 |
+
+`framer.py` 可以直接当库用：
+
+```python
+import framer
+framer.render_file("a.jpg", framer.Params(border=1.5, radius=40, one_line=True), "png")
+```
+
+## 安全
+
+服务只绑定 `127.0.0.1`，每次启动生成一次性 token，校验 `Host` 与 `Origin`，所以浏览器里的其他页面无法驱动它。但它确实能读写当前用户权限内的任意路径（文件选择器就是这么工作的）—— 它是个本地工具，不要把端口暴露到外网。
+
+拖进窗口的照片会被复制一份到仓库下的 `.temp/`（而不是系统临时目录，这样缓存不会散到别处），启动时清理超过一天的旧文件，`.gitignore` 保证它不进提交。想彻底清掉，`rm -rf .temp`。
+
+## 许可
+
+GNU General Public License v3.0 或更高版本。完整条款见 [LICENSE](LICENSE)（gnu.org 的原文，未作任何改动）。
+
+```
+Copyright (C) 2026 QuincyLeo
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```

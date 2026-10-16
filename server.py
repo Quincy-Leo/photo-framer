@@ -362,11 +362,12 @@ class Handler(BaseHTTPRequestHandler):
         params = Params.from_dict(data.get("params"))
         values = session["values"] | (data.get("overrides") or {})
         title, settings = framer.resolve_texts(params, values)
+        mark = framer.resolve_mark(params, values, title)
         report = {}
-        image = framer.render(session["proxy"], params, title, settings, report)
+        image = framer.render(session["proxy"], params, title, settings, report, mark)
         buffer = io.BytesIO()
         image.save(buffer, "JPEG", quality=84, subsampling=1, optimize=False)
-        full = framer.layout(session["photo"].size, params, title, settings)["canvas"]
+        full = framer.layout(session["photo"].size, params, title, settings, mark)["canvas"]
         self._send(200, buffer.getvalue(), "image/jpeg", {
             "X-Canvas": f"{full[0]}x{full[1]}",
             "X-Text-Light": f"{report.get('text_light', params.text_light):.0f}",

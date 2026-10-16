@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, fields
 from PIL import (
     ExifTags,
     Image,
+    ImageChops,
     ImageDraw,
     ImageFilter,
     ImageFont,
@@ -30,6 +31,8 @@ from PIL import (
     ImageStat,
     UnidentifiedImageError,
 )
+
+import logos
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -80,11 +83,12 @@ PARAMS_ALPHA = 0.88     # the parameter line sits slightly back
 TRACKING_EM = 0.03      # letter spacing, as a fraction of the font size
 SEPARATOR = "  |  "
 TITLE_GAP = "  "        # between maker and model: two spaces, not one
+MARK_HEIGHT = 1.2       # a maker's logo, as a multiple of the caption's cap height
 AUTO_LIGHT_THRESHOLD = 0.55  # backdrop luma above this gets black text
 
 __all__ = ["Params", "TEXT_VARS", "READABLE_EXT", "load_source", "exif_values",
-           "resolve_texts", "render", "render_file", "render_bytes", "save_render",
-           "default_out_path", "output_name", "downscale_for_preview"]
+           "resolve_texts", "resolve_mark", "render", "render_file", "render_bytes",
+           "save_render", "default_out_path", "output_name", "downscale_for_preview"]
 
 
 @dataclass
@@ -306,6 +310,30 @@ def resolve_texts(params, values):
     return title.strip(), settings.strip()
 
 
+def resolve_mark(params, values, title=""):
+    """Which maker's logo the caption carries, if any -- or None for text.
+
+    EXIF decides, the way every other framer decides it: the Make field, or
+    the Model field for the files whose Make was stripped on the way here
+    (Nikon and Canon repeat the brand inside Model, and Make is the tag that
+    editors and sharing apps drop).  A hand-typed title has no field to
+    trust, so it is matched on its own text instead: typing "FUJIFILM X-T5"
+    still gets the logo, and typing anything else drops it.
+
+    This is the only place the question is answered; `render` and the caption
+    layout just carry out the answer.
+    """
+    values = values or {}
+    if not params.title_auto:
+        found = logos.split_leading(title or params.title or "")
+        return found[0] if found else None
+    brand = str(values.get("brand") or "").strip().lower()
+    if brand:
+        return brand if brand in logos.MARKS else None
+    found = logos.split_leading(str(values.get("model") or ""))
+    return found[0] if found else None
+
+
 # --------------------------------------------------------------------------
 # drawing primitives
 # --------------------------------------------------------------------------
@@ -472,14 +500,70 @@ def plan_text(text, font, fallback, tracking):
     return glyphs, max(0.0, cursor - tracking), (ascent, descent)
 
 
-def draw_plan(pen, origin, glyphs, fill):
+def cap_height(font):
+    """How tall this face's capitals are, in pixels."""
+    try:
+        return -font.getbbox("H", anchor="ls")[1] or font.getmetrics()[0]
+    except Exception:
+        return font.getmetrics()[0] * 0.72
+
+
+def plan_title(text, font, fallback, tracking, mark=None):
+    """`plan_text`, except that `mark`'s maker name, where it opens `text`,
+    becomes that maker's logo.
+
+    The logo stands on the same baseline as the type and runs MARK_HEIGHT cap
+    heights tall, so it reads as one more word on the line rather than as a
+    pasted-in picture.  `mark` is whatever `resolve_mark` decided; without
+    one -- or if that maker's name turns out not to open the caption after
+    all -- this is plain text.
+    """
+    found = logos.split_leading(text, mark) if mark else None
+    if not found:
+        return plan_text(text, font, fallback, tracking)
+    name, rest = found
+    ascent, descent = font.getmetrics()
+    scale, drop = logos.mark_metrics(name)
+    image = logos.mark_mask(name, cap_height(font) * MARK_HEIGHT * scale)
+    if image is None:
+        return plan_text(text, font, fallback, tracking)
+
+    below = image.height * drop       # a descender in the mark, in pixels
+    items, width = [((image, below), None, 0.0)], float(image.width)
+    if rest:
+        gap = font.getlength(TITLE_GAP)   # the same air the two spaces gave
+        glyphs, tail, (ascent, descent) = plan_text(rest, font, fallback, tracking)
+        items += [(char, face, offset + width + gap) for char, face, offset in glyphs]
+        width += gap + tail
+    return items, width, (max(ascent, image.height - below), max(descent, below))
+
+
+def draw_plan(mask, origin, glyphs, fill):
+    """Stamp a plan into the caption mask.  An item with no face is a logo."""
+    pen = ImageDraw.Draw(mask)
     x, y = origin
-    for char, font, offset in glyphs:
-        if not char.isspace():
-            pen.text((x + offset, y), char, font=font, fill=fill, anchor="ls")
+    for item, font, offset in glyphs:
+        if font is None:
+            paste_mark(mask, item, (x + offset, y), fill)
+        elif not item.isspace():
+            pen.text((x + offset, y), item, font=font, fill=fill, anchor="ls")
 
 
-def caption_lines(params, title, settings, short_side):
+def paste_mark(mask, mark, origin, fill):
+    """Composite a logo into the caption mask, standing on the baseline.
+
+    `mark` is the mask and how far it hangs below that baseline.  Lightened in
+    rather than pasted, so it can never rub out type it overlaps, and scaled
+    by `fill` so it carries the segment's own alpha.
+    """
+    image, below = mark
+    left, bottom = int(round(origin[0])), int(round(origin[1] + below))
+    box = (left, bottom - image.height, left + image.width, bottom)
+    inked = image.point(lambda v: v * fill // 255) if fill < 255 else image
+    mask.paste(ImageChops.lighter(mask.crop(box), inked), box[:2])
+
+
+def caption_lines(params, title, settings, short_side, mark=None):
     """Lay the caption out as lines of baseline-aligned segments.
 
     Two-line mode gives the title its own larger line.  One-line mode keeps
@@ -491,16 +575,18 @@ def caption_lines(params, title, settings, short_side):
     title_pct = (TITLE_PCT_ONE if one else TITLE_PCT) * scale
     params_pct = (PARAMS_PCT_ONE if one else PARAMS_PCT) * scale
 
-    def segment(text, pct, weight, alpha):
+    def segment(text, pct, weight, alpha, titled=False):
         size = max(0.2, pct) / 100.0 * short_side
         font = load_font(size, weight)
         tracking = TRACKING_EM * font.size
-        glyphs, width, (ascent, descent) = plan_text(
-            text, font, load_cjk_font(size, weight), tracking)
+        cjk = load_cjk_font(size, weight)
+        glyphs, width, (ascent, descent) = \
+            plan_title(text, font, cjk, tracking, mark) if titled \
+            else plan_text(text, font, cjk, tracking)
         return {"text": text, "font": font, "alpha": alpha, "glyphs": glyphs,
                 "width": width, "ascent": ascent, "descent": descent}
 
-    head = segment(title, title_pct, TITLE_WEIGHT, 1.0) if title else None
+    head = segment(title, title_pct, TITLE_WEIGHT, 1.0, titled=True) if title else None
     tail = segment(settings, params_pct, PARAMS_WEIGHT, PARAMS_ALPHA) if settings else None
 
     if one:
@@ -524,8 +610,8 @@ def _measure(rows, short_side):
     return metrics, total, line_gap
 
 
-def caption_height(params, title, settings, short_side):
-    rows = caption_lines(params, title, settings, short_side)
+def caption_height(params, title, settings, short_side, mark=None):
+    rows = caption_lines(params, title, settings, short_side, mark)
     if not rows:
         return 0.0
     return _measure(rows, short_side)[1]
@@ -546,13 +632,14 @@ def auto_text_light(backdrop, box):
     return 0.0 if mean > AUTO_LIGHT_THRESHOLD else 100.0
 
 
-def draw_caption(canvas, region, params, title, settings, short_side, report=None):
+def draw_caption(canvas, region, params, title, settings, short_side, report=None,
+                 mark=None):
     """Composite the caption, vertically centred in `region`.
 
     `report`, if given, receives the lightness actually used, so the UI can
     show where "auto" landed on the slider.
     """
-    rows = caption_lines(params, title, settings, short_side)
+    rows = caption_lines(params, title, settings, short_side, mark)
     if not rows:
         return
     x0, y0, x1, y1 = region
@@ -585,9 +672,8 @@ def draw_caption(canvas, region, params, title, settings, short_side, report=Non
     size = (box[2] - box[0], box[3] - box[1])
 
     mask = Image.new("L", size, 0)
-    pen = ImageDraw.Draw(mask)
     for x, baseline, segment in placed:
-        draw_plan(pen, (x - box[0], baseline - box[1]), segment["glyphs"],
+        draw_plan(mask, (x - box[0], baseline - box[1]), segment["glyphs"],
                   int(round(255 * segment["alpha"])))
 
     patch = canvas.crop(box)
@@ -625,7 +711,7 @@ def _shadow_mask(canvas_size, rect, radius, blur, opacity):
     return mask
 
 
-def layout(photo_size, params, title="", settings=""):
+def layout(photo_size, params, title="", settings="", mark=None):
     """Work out the canvas.
 
     Left, right and top all get the same margin.  The bottom band is the
@@ -637,7 +723,7 @@ def layout(photo_size, params, title="", settings=""):
     short_side = min(pw, ph)
     border = min(max(_num(params.border) or 1.0, 0.05), 8.0)
     pad = int(round(border * BASE_PAD / 100.0 * short_side))
-    caption = caption_height(params, title, settings, short_side)
+    caption = caption_height(params, title, settings, short_side, mark)
     bottom = pad + int(math.ceil(caption))
     radius = min(max(_num(params.radius) or 0.0, 0.0), 100.0) / 100.0 * BASE_RADIUS \
         / 100.0 * short_side
@@ -648,10 +734,14 @@ def layout(photo_size, params, title="", settings=""):
     }
 
 
-def render(photo, params, title="", settings="", report=None):
-    """Compose the framed image.  `photo` is pasted at 1:1, never resampled."""
+def render(photo, params, title="", settings="", report=None, mark=None):
+    """Compose the framed image.  `photo` is pasted at 1:1, never resampled.
+
+    `mark` names the maker logo to set in place of the maker's name -- see
+    `resolve_mark`, which is the one place that decides it.
+    """
     pw, ph = photo.size
-    box = layout(photo.size, params, title, settings)
+    box = layout(photo.size, params, title, settings, mark)
     pad, short_side, radius = box["pad"], box["short_side"], box["radius"]
     cw, ch = box["canvas"]
     ox = oy = pad
@@ -672,7 +762,8 @@ def render(photo, params, title="", settings="", report=None):
     else:
         canvas.paste(photo, (ox, oy))
 
-    draw_caption(canvas, (0, oy + ph, cw, ch), params, title, settings, short_side, report)
+    draw_caption(canvas, (0, oy + ph, cw, ch), params, title, settings, short_side,
+                 report, mark)
     return canvas
 
 
@@ -752,7 +843,8 @@ def _compose(src, params, overrides=None):
     photo, info = load_source(src)
     values = exif_values(photo, src) | (overrides or {})
     title, settings = resolve_texts(params, values)
-    return render(photo, params, title, settings), info
+    mark = resolve_mark(params, values, title)
+    return render(photo, params, title, settings, mark=mark), info
 
 
 def render_bytes(src, params, fmt="png", jpeg_quality=100, overrides=None):

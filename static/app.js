@@ -237,7 +237,10 @@ function buildPanel() {
   SETTERS.title = title.set;
   SETTERS.params_text = settings.set;
   state.refreshCaptions = () => { title.refresh(); settings.refresh(); };
-  text.append(title.row, settings.row);
+  const marks = el("p", "hint", "Nikon / DJI / FUJIFILM / Apple 出图显示 logo。");
+  marks.title = "按 EXIF 的厂商字段判断，出图时把标题里的厂商名换成 logo，比型号文字略高、"
+    + "同一条基线；手改标题后改按标题开头的文字判断，改掉厂商名就回到纯文字。";
+  text.append(title.row, marks, settings.row);
 
   const size = slider({ k: "text_scale", label: "字号", min: 0.5, max: 2.5, step: 0.05, unit: "x" });
   SETTERS.text_scale = size.set;

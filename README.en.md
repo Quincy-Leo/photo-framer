@@ -7,19 +7,22 @@ English · [简体中文](README.md)
 Wrap a photo in a good-looking frame that carries its shooting data. The
 photo itself comes out completely untouched.
 
-![UI](docs/ui.png)
+![UI](assets/ui.png)
 
-Six sliders: border width, corner radius, shadow, blur, type size, text
-lightness. The caption is fixed in shape — maker and model, plus the
-exposure settings — editable, and switchable between one line and two. The
-photo's pixels, its colour profile and its EXIF all survive as they were.
+Six fine-tuning sliders: border width, corner radius, shadow, blur, type
+size, text lightness.
 
-Results, one-line and two-line (scaled down to fit the README; the real
-exports are 6706 × 4793 and 6706 × 5065):
+The caption is fixed in shape — maker and model, plus the exposure settings
+— and can be shown on one line or two. The maker names of Nikon, DJI,
+FUJIFILM and Apple print as a vector logo. The photo's pixels, its colour
+profile and its EXIF all survive as they were.
 
-![One line](docs/example.jpg)
+Results, one-line and two-line (the images shown in this README are scaled
+down):
 
-![Two lines](docs/example-two-line.jpg)
+![One line](assets/example.jpg)
+
+![Two lines](assets/example-two-line.jpg)
 
 ## Running it
 
@@ -58,9 +61,7 @@ disk.
   sharing pipelines delete Make/Model/aperture/shutter — gets an empty
   caption. The info bar warns you in yellow; type it in yourself.
 - The frame, caption and shadow colours are written directly in the photo's
-  own numeric space. If the photo is Display P3, white is P3 white — which
-  is exactly what you want from a white that belongs to the same world as
-  the photo.
+  own numeric space. If the photo is Display P3, white is P3 white.
 
 ## Controls
 
@@ -113,16 +114,41 @@ Two lines               NIKON  z5_2
           35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
 ```
 
-On one line the maker and model stay larger and heavier, and the gap to the
-settings is whitespace rather than another pipe, with both groups sharing a
-baseline. That gap is about 5.7 space-widths of the settings face — wide
-enough to read as a grouping break rather than a word space.
-
 Maker and model are printed **exactly as the EXIF spells them**, with no
 case folding: `Nikon` stays `Nikon`, `FUJIFILM` stays `FUJIFILM`. Only two
 things are cleaned up — the corporate suffix some makers append
 (`NIKON CORPORATION` → `NIKON`) and the brand prefix cameras repeat in the
-model field (`FUJIFILM X-T5` → `X-T5`).
+model field (`FUJIFILM X-T5` → `X-T5`). Four makers get a logo instead of
+their name; see below.
+
+### Maker logos
+
+For Nikon, DJI, FUJIFILM and Apple, the maker's name in the title is
+replaced by the maker's logo. Every other maker keeps printing as text.
+
+The logos are **vector** (SVGs in `assets/logos/`), filled at whatever pixel
+height the caption asks for at the moment of rendering. Size and position
+follow the typography:
+
+- Height = **1.2 × the cap height** of the model name beside it
+  (`framer.MARK_HEIGHT`).
+- Logo and type are drawn into the same mask, so **lightness, alpha and the
+  counter-shaded halo all follow the caption** — black type on a bright
+  backdrop means a black logo too.
+
+> Note: each brand has explicit rules about the colour and the context in
+> which its logo may be used. This project uses them only to label a photo's
+> shooting data, non-profit and non-commercial.
+
+**Which maker** is settled by `framer.resolve_mark()`, EXIF first:
+
+1. The EXIF `Make` field, tidied the way the caption tidies it
+   (`NIKON CORPORATION` → `NIKON`).
+2. If `Make` is empty, the `Model` field. Nikon and Canon repeat the brand
+   inside `Model` (`NIKON D850`).
+
+To add a maker logo, add a line to `MARKS` in `logos.py` — an SVG file name
+and the two alignment numbers.
 
 ### Type size
 
@@ -143,17 +169,10 @@ In actual pixels (one line, size 1.0×):
 | 4160 px | 141 px | 122 px |
 | 6000 px | 203 px | 176 px |
 
-Letter spacing, line spacing and the bottom band height all follow the type
-size, so a phone snap and a medium-format frame under the same settings give
-the caption the same share of the picture. That is also why the small
-preview in the browser faithfully represents the final file — there is an
-assertion guarding it (`the caption keeps the same share of the canvas at
-any resolution`).
-
 ### Chinese text
 
 SF Pro carries no CJK glyphs, so Chinese typed into the caption would come
-out as a row of tofu boxes. The tool checks each character against the
+out as a row of placeholder boxes. The tool checks each character against the
 primary face (by rendering it and comparing against a code point no font
 defines) and falls back to Hiragino Sans GB for the ones it lacks — W3 and
 W6 standing in for regular and semibold. Mixed Latin and Chinese share a
@@ -180,8 +199,7 @@ parks at whichever end it chose, so you can see what it decided.
 ## Where the output goes
 
 **A single export is handed to the browser's downloader** and lands in
-whatever folder your browser uses for downloads. The tool never asks where
-to save, and there is no output-directory field. The file is named
+whatever folder your browser uses for downloads. The file is named
 `<original>_framed.png`.
 
 What crosses to the browser is the finished byte stream, and a `Blob`
@@ -208,7 +226,7 @@ onto the window
 ## Tests
 
 ```bash
-python3 tests/test_lossless.py   # renderer: bit-exactness, frame rule, EXIF/EV, tracking, CJK fallback, auto colour, extreme settings
+python3 tests/test_lossless.py   # renderer: bit-exactness, frame rule, EXIF/EV, tracking, CJK fallback, maker logos, auto colour, extreme settings
 python3 tests/test_server.py     # HTTP layer: auth, preview, download-style export, batch, keep-alive framing
 ```
 
@@ -225,9 +243,11 @@ generate their own images.
 | | |
 |---|---|
 | `framer.py` | the renderer. Pure Pillow, importable on its own from a script |
+| `logos.py` | the maker logos: SVG path parsing and on-demand filling, Pillow only as well |
 | `server.py` | the local HTTP service. Binds 127.0.0.1 only; every `/api/` call checks a single-run token |
 | `static/` | the interface |
-| `docs/` | the screenshot and example output used by the README |
+| `assets/logos/` | the four makers' logos, as vectors |
+| `assets/` | the screenshot and example output used by the README |
 
 `framer.py` works directly as a library:
 
@@ -254,6 +274,12 @@ you are not looking. Files older than a day are swept at startup, and
 
 GNU General Public License v3.0 or later. The full terms are in
 [LICENSE](LICENSE) — the text from gnu.org, unmodified.
+
+One exception: the four SVGs in `assets/logos/` come from
+[Simple Icons](https://simpleicons.org) and are CC0-1.0 (each file's
+provenance is in the `.license` beside it). The logos themselves are the
+trademarks of their owners and appear here only to name the camera that took
+the photo.
 
 ```
 Copyright (C) 2026 QuincyLeo

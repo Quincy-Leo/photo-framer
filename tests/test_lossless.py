@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PIL import Image, ImageCms, ImageDraw
 from PIL.TiffImagePlugin import IFDRational
 import framer
+import logos
 
 PASS, FAIL = [], []
 
@@ -272,6 +273,73 @@ def main():
     check("the caption keeps the same share of the canvas at any resolution",
           abs(fractions[0] - fractions[1]) < 0.003,
           f"{fractions[0] * 100:.2f}% vs {fractions[1] * 100:.2f}% of canvas height")
+
+    # ---- four makers print their logo where their name would go ----
+    # Which logo, if any, is settled once by resolve_mark: the EXIF field
+    # first, the caption's own text only when the title was typed by hand.
+    auto = framer.Params()
+    typed = framer.Params(title_auto=False, title="FUJIFILM X-T5")
+    check("the logo is keyed off the EXIF maker",
+          framer.resolve_mark(auto, values) == "dji"
+          and framer.resolve_mark(auto, {"brand": "SONY", "model": "ILCE-7M3"}) is None,
+          "Make picks the mark; a maker we have no mark for stays text")
+    check("a stripped Make falls back to the Model field",
+          framer.resolve_mark(auto, {"brand": "", "model": "NIKON D850"}) == "nikon",
+          "Nikon and Canon repeat the brand inside Model, and Make is the tag "
+          "editors drop")
+    check("a hand-typed title is matched on its own text instead",
+          framer.resolve_mark(typed, {"brand": "DJI"}, "FUJIFILM X-T5") == "fujifilm"
+          and framer.resolve_mark(framer.Params(title_auto=False),
+                                  {"brand": "DJI"}, "My camera") is None,
+          "typing a maker gets its logo; typing anything else drops it")
+    check("the maker's name is taken back off the front of the caption",
+          logos.split_leading("FUJIFILM  X-T5", "fujifilm") == ("fujifilm", "X-T5")
+          and logos.split_leading("NIKON CORPORATION  Z8") == ("nikon corporation", "Z8")
+          and logos.split_leading("Nikonos V") is None,
+          "and a word that merely starts with a maker's letters stays text")
+
+    marked = framer.caption_lines(p, "DJI  Pocket 4", settings, 1600, "dji")[0][0]
+    unmarked = framer.caption_lines(p, "DJI  Pocket 4", settings, 1600)[0][0]
+    marks = [item for item, face, _ in marked["glyphs"] if face is None]
+    check("the maker's name becomes one logo and the model stays type",
+          len(marks) == 1
+          and "".join(c for c, face, _ in marked["glyphs"] if face) == "Pocket 4"
+          and not [i for i, face, _ in unmarked["glyphs"] if face is None],
+          f'{len(marked["glyphs"])} items with a mark, '
+          f'{len(unmarked["glyphs"])} glyphs without one')
+
+    image, below = marks[0]
+    cap = framer.cap_height(marked["font"])
+    check(f"the logo stands {framer.MARK_HEIGHT:g} cap heights tall on the baseline",
+          abs((image.height - below) - cap * framer.MARK_HEIGHT) <= 2,
+          f"{image.height - below:.0f}px above the baseline vs {cap:.0f}px cap "
+          f"height x {framer.MARK_HEIGHT:g}")
+    check("the caption band makes room for a logo taller than the type",
+          marked["ascent"] >= image.height - below and marked["descent"] >= below,
+          f'ascent {marked["ascent"]:.0f}px, descent {marked["descent"]:.0f}px')
+
+    small, large = logos.mark_mask("fujifilm", 40), logos.mark_mask("fujifilm", 400)
+    check("the logo is filled at the size asked for, not scaled from a bitmap",
+          abs(small.width / small.height - large.width / large.height) < 0.01
+          and large.getextrema() == (0, 255),
+          f"{small.size} and {large.size} share one aspect ratio")
+
+    def subpaths(name):
+        letters, counters, _ = logos._mark_outline(name)
+        return len(letters), len(counters)
+    letters, holes = subpaths("nikon")
+    overlapping, none = subpaths("fujifilm")
+    check("a counter inside a letter is punched out; overlapping letters are not",
+          holes == 1 and none == 0,
+          f"nikon: {letters} subpaths of ink, {holes} counter   "
+          f"fujifilm: {overlapping} of ink, {none} counters, so the JI overlap "
+          f"stays ink")
+
+    # same photo, same caption, same parameters: only the mark differs
+    check("the logo reaches the canvas",
+          framer.render(proxy, p, "FUJIFILM  X-T5", settings,
+                        mark="fujifilm").tobytes()
+          != framer.render(proxy, p, "FUJIFILM  X-T5", settings).tobytes())
 
     # ---- Chinese in the caption must not come out as tofu boxes ----
     # SF Pro carries no CJK glyphs; without a fallback face every Chinese

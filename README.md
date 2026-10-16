@@ -6,15 +6,17 @@
 
 为照片添加一个美观的信息展示边框。画质保持完全无损。
 
-![界面](docs/ui.png)
+![界面](assets/ui.png)
 
-六个滑块：边框宽度、圆角、阴影、模糊度、字号、文字明暗。文字内容固定为厂商型号 + 拍摄参数，可改可切一行/两行。照片的像素、色彩描述和 EXIF 原样保留。
+六个微调滑块：边框宽度、圆角、阴影、模糊度、字号、文字明暗。
 
-出图效果，一行和两行各一张（为了放进 README 缩小过，实际导出是 6706 × 4793 和 6706 × 5065）：
+文字内容固定为厂商型号 + 拍摄参数，可选择一行或两行显示。Nikon、DJI、FUJIFILM、Apple 的厂商名显示为矢量 logo。照片的像素、色彩描述和 EXIF 原样保留。
 
-![一行](docs/example.jpg)
+出图效果，一行和两行各一张（README中展示图缩小了尺寸）：
 
-![两行](docs/example-two-line.jpg)
+![一行](assets/example.jpg)
+
+![两行](assets/example-two-line.jpg)
 
 ## 启动
 
@@ -36,7 +38,7 @@ cd photo-framer
 - **HEIC/HEIF 需要额外装一个包**：`pip3 install --user pillow-heif`，装完重启即可识别，不装会给出明确提示。
 - **原图没有 ICC 时**按 sRGB 处理（输出也不写 ICC）。信息栏会标出来。
 - **照片的 EXIF 被剥掉时**（很多修图 App 和分享渠道会把 Make/Model/光圈快门全删掉）文字自动填充会是空的，信息栏用黄字提示，手填即可。
-- 边框、文字、阴影的颜色是直接写在原图的数值空间里的。如果原图是 Display P3，白就是 P3 白 —— 想要「和照片同一个世界」的白，这正是想要的行为。
+- 边框、文字、阴影的颜色是直接写在原图的数值空间里的。如果原图是 Display P3，白就是 P3 白。
 
 ## 参数
 
@@ -76,9 +78,25 @@ cd photo-framer
        35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
 ```
 
-一行模式下厂商型号仍然更大更粗，和参数之间用空白分组而不是再加一根竖线，两组共享同一条基线。那段空白约等于参数字体的 5.7 个空格宽，宽到足以读成"分组"而不是"词距"。
+厂商和型号**按 EXIF 里的原样显示**，不做大小写转换：EXIF 写 `Nikon` 就显示 `Nikon`，写 `FUJIFILM` 就显示 `FUJIFILM`。只有两处清理：厂商名里的公司后缀（`NIKON CORPORATION` → `NIKON`），和型号里重复的品牌前缀（`FUJIFILM X-T5` → `X-T5`）。四家厂商的名字会换成 logo，见下一节。
 
-厂商和型号**按 EXIF 里的原样显示**，不做大小写转换：EXIF 写 `Nikon` 就显示 `Nikon`，写 `FUJIFILM` 就显示 `FUJIFILM`。只有两处清理：厂商名里的公司后缀（`NIKON CORPORATION` → `NIKON`），和型号里重复的品牌前缀（`FUJIFILM X-T5` → `X-T5`）。
+### 厂商 logo
+
+Nikon、DJI、FUJIFILM、Apple 这四家，标题里的厂商名会显示成厂商 logo；其余厂商照常显示文字。
+
+logo 是**矢量**的（SVG 放在 `assets/logos/`），每次渲染按当前需要的像素高度现场填充。大小和位置按排版规则对齐：
+
+- 高度 = 旁边型号文字的**大写字高 × 1.2**（`framer.MARK_HEIGHT`）。
+- logo 和文字画进同一张蒙版，所以**明暗、透明度、反向衬底全都和文字同步** —— 亮背景下文字变黑，logo 也跟着变黑。
+
+> 声明：各个品牌对自家logo的颜色和使用场景有明确规定，本项目仅用于照片信息显示，非赢利非商用。
+
+厂商信息由 `framer.resolve_mark()` 信息决定，EXIF 优先：
+
+1. 先看 EXIF 的 `Make` 字段（清理过的厂商名，`NIKON CORPORATION` → `NIKON`）。
+2. `Make` 为空就退回 `Model`。尼康和佳能会把品牌名重复写进 `Model`（`NIKON D850`）。
+
+添加新厂商logo只需在 `logos.py` 的 `MARKS` 里加一行（SVG 文件名 + 两个对齐参数）。
 
 ### 字号
 
@@ -97,11 +115,9 @@ cd photo-framer
 | 4160 px | 141 px | 122 px |
 | 6000 px | 203 px | 176 px |
 
-字距、行距、下边框高度都跟着字号走，所以手机直出和中画幅拍的片子套同一套参数，文字占画面的比例是一样的。这也正是浏览器里那张小图预览能准确代表成品的原因 —— 有断言在守（`the caption keeps the same share of the canvas at any resolution`）。
-
 ### 中文
 
-SF Pro 不含中文字形，所以标题里打中文会是一排方块。工具会逐字检测主字体有没有这个字形（渲染出来跟一个任何字体都没定义的码位比对），缺的字自动换 Hiragino Sans GB（W3/W6 对应常规/半粗），中英混排时两种字形共享同一条基线。
+SF Pro 不含中文字形，所以标题里打中文会是一排占位符。本工具会逐字检测主字体有没有这个字形（渲染出来跟一个任何字体都没定义的码位比对），缺的字自动换 Hiragino Sans GB（W3/W6 对应常规/半粗），中英混排时两种字形共享同一条基线。
 
 ### 字距
 
@@ -115,7 +131,7 @@ SF Pro 不含中文字形，所以标题里打中文会是一排方块。工具�
 
 ## 输出位置
 
-**单张导出交给浏览器下载**，落到浏览器自己的下载目录，工具不需要问你要存哪儿、也没有输出目录这个输入框。文件名是 `<原名>_framed.png`。
+**单张导出交给浏览器下载**，落到浏览器自己的下载目录。文件名是 `<原名>_framed.png`。
 
 传给浏览器的是渲染好的字节流，`Blob` 下载是逐字节拷贝 —— 中间没有任何一步重新编码。
 
@@ -132,7 +148,7 @@ SF Pro 不含中文字形，所以标题里打中文会是一排方块。工具�
 ## 测试
 
 ```bash
-python3 tests/test_lossless.py   # 渲染内核：逐位一致性、边框规则、EXIF/EV、字距、中文回退、自动配色、极端参数
+python3 tests/test_lossless.py   # 渲染内核：逐位一致性、边框规则、EXIF/EV、字距、中文回退、厂商 logo、自动配色、极端参数
 python3 tests/test_server.py     # HTTP 层：鉴权、预览、下载式导出、批量、keep-alive 分帧
 ```
 
@@ -143,9 +159,11 @@ python3 tests/test_server.py     # HTTP 层：鉴权、预览、下载式导出�
 | | |
 |---|---|
 | `framer.py` | 渲染内核。纯 Pillow，可单独 import 用在脚本里 |
+| `logos.py` | 厂商 logo：SVG 路径解析 + 按需栅格化，同样只依赖 Pillow |
 | `server.py` | 本地 HTTP 服务，只监听 127.0.0.1，所有 `/api/` 调用校验一次性 token |
 | `static/` | 界面 |
-| `docs/` | README 用的界面截图和出图示例 |
+| `assets/logos/` | 四家厂商的矢量 logo（SVG） |
+| `assets/` | README 用的界面截图和出图示例 |
 
 `framer.py` 可以直接当库用：
 
@@ -163,6 +181,8 @@ framer.render_file("a.jpg", framer.Params(border=1.5, radius=40, one_line=True),
 ## 许可
 
 GNU General Public License v3.0 或更高版本。完整条款见 [LICENSE](LICENSE)（gnu.org 的原文，未作任何改动）。
+
+例外：`assets/logos/` 里的四个 SVG 来自 [Simple Icons](https://simpleicons.org)，按 CC0-1.0 提供（每个文件旁边的 `.license` 写明了出处）。logo 本身是各厂商的注册商标，这里只用来标注这张照片是谁家的相机拍的。
 
 ```
 Copyright (C) 2026 QuincyLeo

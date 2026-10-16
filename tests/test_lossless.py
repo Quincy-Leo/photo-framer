@@ -76,7 +76,7 @@ def main():
     check("maker and model keep the EXIF's own capitalisation",
           framer.auto_title({"brand": "Nikon", "model": "z5_2"}) == "Nikon  z5_2"
           and framer.auto_title({"brand": "FUJIFILM", "model": "X-T5"}) == "FUJIFILM  X-T5")
-    check("one line is the default layout", framer.Params().one_line is True)
+    check("two lines is the default layout", framer.Params().one_line is False)
 
     # ---- exposure compensation only shows up when it isn't zero ----
     check("zero EV is left out of the caption", values["ev"] == "",
@@ -102,7 +102,7 @@ def main():
     short = min(photo.size)
     out = framer.render(photo, p, title, settings)
     box = framer.layout(photo.size, p, title, settings)
-    pad = round(framer.BASE_PAD / 100 * short)
+    pad = round(p.border * framer.BASE_PAD / 100 * short)
     check("side and top borders are one border width", box["pad"] == pad,
           f'{box["pad"]} vs {pad}')
     caption = framer.caption_height(p, title, settings, short)
@@ -255,13 +255,13 @@ def main():
           "  ".join(f"short {k}px -> {v}px type ({v / k * 100:.2f}%)"
                     for k, v in sizes.items()))
     check("the tuned title size is the expected fraction of the short side",
-          abs(sizes[4800] / 4800 * 100 - framer.TITLE_PCT_ONE) < 0.03,
-          f"{sizes[4800] / 4800 * 100:.2f}% vs {framer.TITLE_PCT_ONE}% (one-line default)")
-    two_line_row = framer.caption_lines(
-        framer.Params(one_line=False), title, settings, 4800)[0]
-    check("the two-line layout uses its own larger title size",
-          abs(two_line_row[0]["font"].size / 4800 * 100 - framer.TITLE_PCT) < 0.03,
-          f'{two_line_row[0]["font"].size / 4800 * 100:.2f}% vs {framer.TITLE_PCT}%')
+          abs(sizes[4800] / 4800 * 100 - framer.TITLE_PCT) < 0.03,
+          f"{sizes[4800] / 4800 * 100:.2f}% vs {framer.TITLE_PCT}% (two-line default)")
+    one_line_row = framer.caption_lines(
+        framer.Params(one_line=True), title, settings, 4800)[0]
+    check("the one-line layout uses its own smaller title size",
+          abs(one_line_row[0]["font"].size / 4800 * 100 - framer.TITLE_PCT_ONE) < 0.03,
+          f'{one_line_row[0]["font"].size / 4800 * 100:.2f}% vs {framer.TITLE_PCT_ONE}%')
 
     # a caption rendered on two different photo sizes occupies the same
     # fraction of the frame -- which is what makes the small preview faithful

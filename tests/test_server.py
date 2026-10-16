@@ -151,8 +151,8 @@ def main():
           headers2.get("X-Canvas") != headers.get("X-Canvas"),
           f'{headers.get("X-Canvas")} -> {headers2.get("X-Canvas")}')
     _, _, headers3 = call("/api/preview", {"id": session_id,
-                                           "params": dict(params, one_line=False)})
-    check("two-line mode grows the canvas",
+                                           "params": dict(params, one_line=True)})
+    check("one-line mode shrinks the canvas",
           headers3.get("X-Canvas") != headers.get("X-Canvas"),
           f'{headers.get("X-Canvas")} -> {headers3.get("X-Canvas")}')
 

@@ -62,7 +62,7 @@ TEXT_VARS = ["brand", "model", "focal", "focal35", "aperture", "shutter", "iso",
 # Tuned base proportions, all as a percentage of the photo's short side.  The
 # UI exposes multipliers and 0-100 strengths on top of these; nobody has to
 # think in percentages.
-BASE_PAD = 5.6          # frame width at border = 1.0
+BASE_PAD = 6.72         # frame width at border = 1.0
 BASE_RADIUS = 8.0       # corner radius at radius = 100
 BASE_BG_BLUR = 12.0     # backdrop blur at blur = 100
 BLUR_FLOOR = 3.0        # the blur slider does not go below this
@@ -97,11 +97,11 @@ class Params:
 
     border: float = 1.0        # frame width, multiple of BASE_PAD (0.1 - 5.0)
     radius: float = 28.0       # 0 = square corners, 100 = very round
-    shadow: float = 45.0       # 0 = no shadow
-    blur: float = 10.0         # backdrop blur strength; floor is BLUR_FLOOR
+    shadow: float = 60.0       # 0 = no shadow
+    blur: float = 25.0         # backdrop blur strength; floor is BLUR_FLOOR
     text_scale: float = 1.0    # font size multiplier (0.5 - 2.0)
 
-    one_line: bool = True      # maker/model and settings share one baseline
+    one_line: bool = False     # maker/model and settings share one baseline
     title: str = ""            # maker + model; used only when title_auto is off
     title_auto: bool = True
     params_text: str = ""      # focal | aperture | shutter | ISO

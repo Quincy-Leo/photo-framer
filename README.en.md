@@ -70,10 +70,10 @@ proportions are already tuned by eye and are not exposed.
 
 | Control | Range | Notes |
 |---|---|---|
-| Border width | 0.1 – 5.0 ×, step 0.1 | 1.0 is the tuned base width (5.6% of the short edge) |
+| Border width | 0.1 – 5.0 ×, step 0.1 | 1.0 is the tuned base width (6.72% of the short edge) |
 | Corner radius | 0 – 100 | 0 is square |
-| Shadow | 0 – 100 | 0 is no shadow; opacity and spread move together |
-| Blur | 3 – 100, default 10 | Gaussian; the dial × 0.12% is the radius as a share of the short edge |
+| Shadow | 0 – 100, default 60 | 0 is no shadow; opacity and spread move together |
+| Blur | 3 – 100, default 25 | Gaussian; the dial × 0.12% is the radius as a share of the short edge |
 | Type size | 0.5 – 2.5 × | scales both lines; 1.0 is the tuned base size |
 | Text lightness | 0 – 100, or automatic | see below |
 
@@ -97,20 +97,20 @@ Every length above is derived from the photo's own dimensions.
 
 The backdrop is the photo itself, scaled up 1.15× and centre-cropped, under
 a **Gaussian blur**. The dial × 0.12% is the Gaussian radius as a share of
-the photo's short edge — the default of 10 means 1.2% (about 33 px on a
+the photo's short edge — the default of 25 means 3% (about 83 px on a
 3450 × 2760 photo), and the floor of 3 means 0.36%.
 
 ## The caption
 
 Two fixed groups: **maker  model** (two spaces between them), and
 **focal | aperture | shutter | ISO**, pipe separated. A non-zero exposure
-compensation adds `+0.3EV` on the end; a zero one is left out. One line by
-default, two if you prefer:
+compensation adds `+0.3EV` on the end; a zero one is left out. Two lines by
+default, one if you prefer:
 
 ```
-One line (default)  NIKON  z5_2    35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
+One line                NIKON  z5_2    35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
 
-Two lines               NIKON  z5_2
+Two lines (default)         NIKON  z5_2
           35.0mm | f/5.6 | 1/1250 | ISO320 | +0.3EV
 ```
 

@@ -120,6 +120,8 @@ html, body {
 .group > summary:hover { color: var(--fg); }
 .rows { padding: 2px 16px 12px; display: flex; flex-direction: column; gap: 8px; }
 .rows.tight { padding: 0; gap: 6px; }
+/* the rows only one border style shows; laid out exactly like .rows itself */
+.sub { display: flex; flex-direction: column; gap: 8px; }
 
 /* ---------- controls ---------- */
 .row { display: grid; grid-template-columns: 76px 1fr 52px; align-items: center; gap: 9px; }

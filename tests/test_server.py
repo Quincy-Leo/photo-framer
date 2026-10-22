@@ -162,7 +162,7 @@ def main():
     original = Image.open(photo)
     original.load()
     short = min(original.size)
-    pad = round(params["border"] * framer.BASE_PAD / 100 * short)
+    pad = round(params["border"] * framer.BlurStyle.BASE_PAD / 100 * short)
     # square corners isolate the question "did the photo pixels survive?"
     # from the corner arcs, which have to blend with the backdrop by design.
     square = dict(params, radius=0.0, shadow=0.0)
@@ -209,7 +209,7 @@ def main():
     })
     rounded = Image.open(io.BytesIO(payload))
     rounded.load()
-    radius = int(round(params["radius"] / 100 * framer.BASE_RADIUS / 100 * short)) + 2
+    radius = int(round(params["radius"] / 100 * framer.BlurStyle.BASE_RADIUS / 100 * short)) + 2
     got = rounded.crop((pad + radius, pad, pad + original.width - radius, pad + original.height))
     want = original.crop((radius, 0, original.width - radius, original.height))
     check("png with rounded corners: everything but the arcs is bit-identical",

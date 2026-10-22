@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -39,40 +40,70 @@ TOKEN = secrets.token_urlsafe(16)
 # Dropped photos are staged inside the checkout, not in a system temp
 # directory, so the cache can never leak somewhere the user isn't looking.
 # .gitignore keeps it out of commits; stale files are swept at startup.
-CACHE_DIR = os.path.join(HERE, ".temp")
+CACHE_DIR = os.path.join(HERE, ".tmp")
+# ... and only files this server itself wrote are ever swept: a staged upload
+# is named <8 hex>-<original name>, and anything else in the folder is
+# somebody's own file that happens to be sitting there.
+STAGED_NAME = re.compile(r"^[0-9a-f]{8}-")
 MAX_UPLOAD = 400 * 1024 * 1024
 MAX_SESSIONS = 4
 PREVIEW_LONG_SIDE = 1024
-
-_sessions: dict[str, dict] = {}
-_jobs: dict[str, dict] = {}
-_lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------
 # sessions
 # --------------------------------------------------------------------------
 
-def open_session(path):
-    path = os.path.abspath(os.path.expanduser(path))
-    if not os.path.isfile(path):
-        raise FileNotFoundError(path)
-    photo, info = framer.load_source(path)
-    values = framer.exif_values(photo, path)
-    session = {
-        "id": uuid.uuid4().hex[:12],
-        "path": path,
-        "photo": photo,
-        "info": info,
-        "values": values,
-        "proxy": framer.downscale_for_preview(photo, PREVIEW_LONG_SIDE),
-        "touched": time.time(),
-    }
-    with _lock:
-        _sessions[session["id"]] = session
-        for stale in sorted(_sessions.values(), key=lambda s: s["touched"])[:-MAX_SESSIONS]:
-            _sessions.pop(stale["id"], None)
-    return session
+class SessionStore:
+    """The photos open in the browser right now, the newest-touched kept.
+
+    A session holds the decoded full-size photo and its preview proxy, so the
+    store is where this process's memory goes -- hence the cap.  The lock
+    guards the dict and nothing else: decoding happens outside it, or every
+    preview would queue behind whatever large file someone just opened.
+    """
+
+    def __init__(self, limit=MAX_SESSIONS):
+        self._limit = limit
+        self._sessions = {}
+        self._lock = threading.Lock()
+
+    def open(self, path):
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isfile(path):
+            raise FileNotFoundError(path)
+        photo, info = framer.load_source(path)
+        values = framer.exif_values(photo, path)
+        session = {
+            "id": uuid.uuid4().hex[:12],
+            "path": path,
+            "photo": photo,
+            "info": info,
+            "values": values,
+            "proxy": framer.downscale_for_preview(photo, PREVIEW_LONG_SIDE),
+            "touched": time.time(),
+        }
+        with self._lock:
+            # the new session goes in first, so the freshest entry is always
+            # one of the ones kept
+            self._sessions[session["id"]] = session
+            stale = sorted(self._sessions.values(),
+                           key=lambda s: s["touched"])[:-self._limit]
+            for old in stale:
+                self._sessions.pop(old["id"], None)
+        return session
+
+    def get(self, session_id):
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session["touched"] = time.time()
+        if not session:
+            raise KeyError("session expired, please reopen the photo")
+        return session
+
+
+SESSIONS = SessionStore()
 
 
 def session_summary(session):
@@ -85,7 +116,7 @@ def session_summary(session):
             name = ImageCms.getProfileDescription(ImageCms.ImageCmsProfile(io.BytesIO(icc))).strip()
         except Exception:
             name = f"{len(icc)} bytes"
-    return {
+    summary = {
         "id": session["id"],
         "path": session["path"],
         "name": os.path.basename(session["path"]),
@@ -103,16 +134,10 @@ def session_summary(session):
         "auto_title": framer.auto_title(session["values"]),
         "auto_params": framer.auto_params(session["values"]),
     }
-
-
-def get_session(session_id):
-    with _lock:
-        session = _sessions.get(session_id)
-        if session:
-            session["touched"] = time.time()
-    if not session:
-        raise KeyError("session expired, please reopen the photo")
-    return session
+    # what each info-bar field shows while it is still following the EXIF
+    for slot, auto in framer.BAR_SLOTS.items():
+        summary[f"auto_bar_{slot}"] = auto(session["values"])
+    return summary
 
 
 # --------------------------------------------------------------------------
@@ -142,13 +167,19 @@ def reveal(path):
 
 
 def sweep_cache(max_age=86400):
-    """Dropped photos are copied into .temp/; drop yesterday's leftovers."""
+    """Dropped photos are copied into .tmp/; drop yesterday's leftovers.
+
+    Only this server's own staged copies are touched -- never a file someone
+    put in the folder themselves.
+    """
     cutoff = time.time() - max_age
     try:
         names = os.listdir(CACHE_DIR)
     except OSError:
         return
     for name in names:
+        if not STAGED_NAME.match(name):
+            continue
         full = os.path.join(CACHE_DIR, name)
         try:
             if os.path.isfile(full) and os.path.getmtime(full) < cutoff:
@@ -177,35 +208,75 @@ def list_images(folder):
     return out
 
 
-def start_batch(folder, params, fmt, out_dir, overrides):
-    files = list_images(folder)
-    base = os.path.abspath(os.path.expanduser(folder))
-    job = {"id": uuid.uuid4().hex[:12], "total": len(files), "done": 0,
-           "written": [], "errors": [], "finished": not files, "current": "",
-           "out_dir": out_dir or os.path.join(base, "framed"), "cancel": False}
-    with _lock:
-        _jobs[job["id"]] = job
-        for stale in [j for j in list(_jobs.values()) if j["finished"]][:-8]:
-            _jobs.pop(stale["id"], None)
+class JobRegistry:
+    """The batch renders this process has started, and their progress.
 
-    def run():
-        for path in files:
-            if job["cancel"]:
-                break
-            job["current"] = os.path.basename(path)
-            try:
-                written, _ = framer.render_file(path, params, fmt, out_dir=job["out_dir"],
-                                                overrides=overrides)
-                job["written"].append(written)
-            except Exception as exc:
-                job["errors"].append(f"{os.path.basename(path)}: {type(exc).__name__}: {exc}")
-            job["done"] += 1
-        job["current"] = ""
-        job["finished"] = True
+    Its own lock, separate from the session store's: the two are never
+    touched in the same breath, so one lock each is the finer grain.  What
+    the lock covers is the registry dict -- which jobs exist.  A job's own
+    counters are written by its worker thread without any lock, so a report
+    is a consistent view of the registry, not an instant of the render.
+    """
 
-    if files:
-        threading.Thread(target=run, daemon=True).start()
-    return job
+    def __init__(self):
+        self._jobs = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _public(job):
+        """A job as the browser sees it: everything but the cancel flag."""
+        return {k: v for k, v in job.items() if k != "cancel"}
+
+    def start(self, folder, params, fmt, out_dir, overrides):
+        files = list_images(folder)
+        base = os.path.abspath(os.path.expanduser(folder))
+        job = {"id": uuid.uuid4().hex[:12], "total": len(files), "done": 0,
+               "written": [], "errors": [], "finished": not files, "current": "",
+               "out_dir": out_dir or os.path.join(base, "framed"), "cancel": False}
+        with self._lock:
+            self._jobs[job["id"]] = job
+            stale = [j for j in list(self._jobs.values()) if j["finished"]][:-8]
+            for old in stale:
+                self._jobs.pop(old["id"], None)
+
+        def run():
+            for path in files:
+                if job["cancel"]:
+                    break
+                job["current"] = os.path.basename(path)
+                try:
+                    written, _ = framer.render_file(path, params, fmt,
+                                                    out_dir=job["out_dir"],
+                                                    overrides=overrides)
+                    job["written"].append(written)
+                except Exception as exc:
+                    job["errors"].append(
+                        f"{os.path.basename(path)}: {type(exc).__name__}: {exc}")
+                job["done"] += 1
+            job["current"] = ""
+            job["finished"] = True
+
+        if files:
+            threading.Thread(target=run, daemon=True).start()
+        with self._lock:
+            return self._public(job)
+
+    def report(self, job_id):
+        """How `job_id` is getting on, or None when there is no such job."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return self._public(job) if job else None
+
+    def cancel(self, job_id):
+        """Ask `job_id` to stop after the file it is on.  False if unknown."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job["cancel"] = True
+            return bool(job)
+
+
+JOBS = JobRegistry()
 
 
 # --------------------------------------------------------------------------
@@ -287,10 +358,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": error}, 500)
             return self._json({"path": path})
         if route.path == "/api/batch":
-            job = _jobs.get((query.get("job") or [""])[0])
-            if not job:
+            report = JOBS.report((query.get("job") or [""])[0])
+            if report is None:
                 return self._json({"error": "unknown job"}, 404)
-            return self._json({k: v for k, v in job.items() if k != "cancel"})
+            return self._json(report)
         if route.path == "/api/scan":
             folder = (query.get("folder") or [""])[0]
             files = list_images(folder)
@@ -344,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _load(self):
         data = self._payload()
-        self._json(session_summary(open_session(data.get("path", ""))))
+        self._json(session_summary(SESSIONS.open(data.get("path", ""))))
 
     def _upload(self):
         name = os.path.basename(self.headers.get("X-Filename") or "dropped.jpg")
@@ -352,22 +423,25 @@ class Handler(BaseHTTPRequestHandler):
         target = os.path.join(CACHE_DIR, f"{uuid.uuid4().hex[:8]}-{name}")
         with open(target, "wb") as handle:
             handle.write(self.raw_body)
-        summary = session_summary(open_session(target))
+        summary = session_summary(SESSIONS.open(target))
         summary["temporary"] = True
         self._json(summary)
 
     def _preview(self):
         data = self._payload()
-        session = get_session(data.get("id", ""))
+        session = SESSIONS.get(data.get("id", ""))
         params = Params.from_dict(data.get("params"))
         values = session["values"] | (data.get("overrides") or {})
         title, settings = framer.resolve_texts(params, values)
-        mark = framer.resolve_mark(params, values, title)
+        texts = framer.bar_texts(params, values)
+        mark = framer.resolve_mark(params, values, title, texts)
         report = {}
-        image = framer.render(session["proxy"], params, title, settings, report, mark)
+        image = framer.render(session["proxy"], params, title, settings, report, mark,
+                              texts)
         buffer = io.BytesIO()
         image.save(buffer, "JPEG", quality=84, subsampling=1, optimize=False)
-        full = framer.layout(session["photo"].size, params, title, settings, mark)["canvas"]
+        full = framer.layout(session["photo"].size, params, title, settings, mark,
+                             texts)["canvas"]
         self._send(200, buffer.getvalue(), "image/jpeg", {
             "X-Canvas": f"{full[0]}x{full[1]}",
             "X-Text-Light": f"{report.get('text_light', params.text_light):.0f}",
@@ -381,7 +455,7 @@ class Handler(BaseHTTPRequestHandler):
         nothing on the way re-encodes the image.
         """
         data = self._payload()
-        session = get_session(data.get("id", ""))
+        session = SESSIONS.get(data.get("id", ""))
         params = Params.from_dict(data.get("params"))
         fmt = (data.get("format") or "png").lower()
         started = time.time()
@@ -405,16 +479,13 @@ class Handler(BaseHTTPRequestHandler):
         out_dir = data.get("out_dir") or None
         if out_dir:
             out_dir = os.path.abspath(os.path.expanduser(out_dir))
-        job = start_batch(folder, Params.from_dict(data.get("params")),
-                          (data.get("format") or "png").lower(), out_dir,
-                          data.get("overrides") or {})
-        self._json({k: v for k, v in job.items() if k != "cancel"})
+        job = JOBS.start(folder, Params.from_dict(data.get("params")),
+                         (data.get("format") or "png").lower(), out_dir,
+                         data.get("overrides") or {})
+        self._json(job)
 
     def _cancel(self):
-        job = _jobs.get(self._payload().get("job", ""))
-        if job:
-            job["cancel"] = True
-        self._json({"ok": bool(job)})
+        self._json({"ok": JOBS.cancel(self._payload().get("job", ""))})
 
     def _reveal(self):
         reveal(os.path.abspath(os.path.expanduser(self._payload().get("path", ""))))

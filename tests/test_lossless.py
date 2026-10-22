@@ -53,6 +53,93 @@ def make_source(path, size=(600, 400), bias=None):
     return path if bias is not None else icc
 
 
+def mark_height(params, size, values):
+    """How tall the logo ends up in the info bar, in pixels."""
+    texts = framer.bar_texts(params, values)
+    mark = framer.resolve_mark(params, values, "", texts)
+    plan = framer.bar_plan(size, params, texts, mark)
+    return next((s[3].height for s in plan.strokes if s[0] == "mark"), 0)
+
+
+def bar_tests(photo, proxy, values):
+    """The info-bar style: a flat band under the photo, camera data set in it."""
+    nikon = dict(values, brand="NIKON", model="Z50II",
+                 lens="NIKKOR Z DX 16-50mm f/2.8 VR")
+    bar = framer.Params(style="bar")
+
+    texts = framer.bar_texts(bar, nikon)
+    check("the band reads its four strings off the EXIF",
+          texts["model"] == "NIKON Z50II"
+          and texts["params"] == "20mm, F2, 1/1000s, ISO50"
+          and texts["lens"] == nikon["lens"] and texts["date"].startswith("2025-10-12"),
+          repr(texts))
+    check("the exposure line is written the way a camera back writes it",
+          framer.auto_bar_params({"focal": "16.0mm", "aperture": "f/5.6",
+                                  "shutter": "1/800", "iso": "ISO100"})
+          == "16mm, F5.6, 1/800s, ISO100")
+    check("emptying a field drops that line rather than refilling it",
+          framer.bar_texts(framer.Params(style="bar", bar_lens_auto=False),
+                           nikon)["lens"] == "")
+
+    out = framer.render(photo, bar, texts=texts,
+                        mark=framer.resolve_mark(bar, nikon, "", texts))
+    check("the photo keeps its own three edges; the band hangs below",
+          out.width == photo.width and out.height > photo.height)
+    check("the photo's pixels are untouched under the info bar",
+          out.crop((0, 0, photo.width, photo.height)).tobytes() == photo.tobytes())
+
+    shares = [framer.bar_plan(size, bar, texts, "nikon").height / size[0]
+              for size in (photo.size, proxy.size, (12000, 8000))]
+    check("the band keeps the same share of the photo's width at any resolution",
+          max(shares) - min(shares) < 0.002,
+          "  ".join(f"{s * 100:.2f}%" for s in shares))
+
+    heights = {w: framer.bar_plan(photo.size, framer.Params(style="bar", bar_width=w),
+                                  texts, "nikon").height for w in (0.5, 1.0, 3.0)}
+    check("the band's height follows the width control",
+          heights[0.5] < heights[1.0] < heights[3.0], repr(heights))
+    short = {"params": "20mm", "lens": "Z", "model": "Z8", "date": "2025"}
+    big = framer.bar_plan(photo.size, framer.Params(style="bar", bar_text_scale=4.0),
+                          short, "nikon")
+    check("the band grows rather than clip type it cannot hold",
+          big.height > heights[1.0], f"{big.height}px vs {heights[1.0]}px")
+
+    logos_at = {s: mark_height(framer.Params(style="bar", bar_logo_scale=s),
+                               photo.size, nikon) for s in (1.0, 1.5, 2.5, 5.0)}
+    check("the logo grows with its own control until it stands level with the type",
+          logos_at[1.0] < logos_at[1.5] and logos_at[2.5] == logos_at[5.0],
+          repr(logos_at))
+    check("... and past that only a wider band makes it bigger",
+          mark_height(framer.Params(style="bar", bar_logo_scale=5.0, bar_width=2.0),
+                      photo.size, nikon) > logos_at[5.0])
+
+    z = framer.FONTS.sans(40, framer.BarStyle.LINE1_WEIGHT)
+    plain = framer.plan_text("Z", z, z, 0.0)[0]
+    split = framer.plan_text(framer.NikonZ.marked("NIKON Z50II"), z, z, 0.0)[0]
+    check("Nikon's Z is set as a mark, not as the font's own letter",
+          plain[0][1] is z and any(face is None for _, face, _ in split),
+          f"{len(split)} items, one of them a mark")
+    check("... and the Z of a NIKKOR Z lens stays a plain letter",
+          framer.NikonZ.marked("NIKKOR Z DX 16-50mm f/2.8 VR")
+          == "NIKKOR Z DX 16-50mm f/2.8 VR"
+          and framer.NikonZ.marked("NIKON Zfc") != "NIKON Zfc")
+    cut = framer.NikonZ.glyph(z)
+    rows = [framer._ink_span(cut, y) for y in range(cut.height)]
+    middle = [s for s in rows[len(rows) // 3: len(rows) * 2 // 3] if s]
+    check("the split Z is one glyph with a gap cut down its diagonal",
+          cut.size[1] == int(math.ceil(framer.cap_height(z)))
+          and all(span[1] - span[0] < cut.width * 0.6 for span in middle),
+          f"{cut.size[0]}x{cut.size[1]}, diagonal {middle[0][1] - middle[0][0] + 1}px wide")
+
+    corners = []
+    for shade in ("white", "black"):
+        band = framer.render(proxy, framer.Params(style="bar", bar_color=shade),
+                             texts=texts, mark="nikon")
+        corners.append(band.getpixel((2, band.height - 2)))
+    check("the band is a flat white or a flat black", corners == [(255,) * 3, (0,) * 3],
+          repr(corners))
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="framer-test-")
     src = os.path.join(tmp, "source.png")
@@ -65,6 +152,12 @@ def main():
           and values["shutter"] == "1/1000" and values["aperture"] == "f/2"
           and values["focal"] == "20.0mm" and values["iso"] == "ISO50",
           repr({k: v for k, v in values.items() if v}))
+    check("a Nikon mark number is printed the way the camera prints it",
+          framer.tidy_model("NIKON", "Z50_2") == "Z50II"
+          and framer.tidy_model("NIKON", "Z6_3") == "Z6III"
+          and framer.tidy_model("NIKON", "D850") == "D850"
+          and framer.tidy_model("SONY", "Z50_2") == "Z50_2",
+          "Z50_2 is a field convention, not the name on the body")
 
     p = framer.Params()
     title, settings = framer.resolve_texts(p, values)
@@ -102,10 +195,10 @@ def main():
     short = min(photo.size)
     out = framer.render(photo, p, title, settings)
     box = framer.layout(photo.size, p, title, settings)
-    pad = round(p.border * framer.BASE_PAD / 100 * short)
+    pad = round(p.border * framer.BlurStyle.BASE_PAD / 100 * short)
     check("side and top borders are one border width", box["pad"] == pad,
           f'{box["pad"]} vs {pad}')
-    caption = framer.caption_height(p, title, settings, short)
+    caption = framer.Caption(p, title, settings, short).height()
     check("bottom band is caption plus exactly one border width",
           box["bottom"] == pad + math.ceil(caption),
           f'bottom {box["bottom"]} = caption {caption:.1f} + pad {pad}')
@@ -120,7 +213,7 @@ def main():
 
     # ---- the border multiplier scales all four sides together ----
     wide = framer.layout(photo.size, framer.Params(border=3.0), title, settings)
-    expect_pad = round(3.0 * framer.BASE_PAD / 100 * short)
+    expect_pad = round(3.0 * framer.BlurStyle.BASE_PAD / 100 * short)
     check("border multiplier scales the frame", wide["pad"] == expect_pad,
           f'{wide["pad"]} vs {expect_pad}')
 
@@ -139,7 +232,7 @@ def main():
 
     # ---- bit exactness inside the rounded corners ----
     rounded = framer.render(photo, p, title, settings)
-    r = int(round(p.radius / 100 * framer.BASE_RADIUS / 100 * short)) + 2
+    r = int(round(p.radius / 100 * framer.BlurStyle.BASE_RADIUS / 100 * short)) + 2
     got = rounded.crop((pad + r, pad, pad + photo.width - r, pad + photo.height))
     want = photo.crop((r, 0, photo.width - r, photo.height))
     check("rounded corners: interior is bit-identical", got.tobytes() == want.tobytes())
@@ -226,10 +319,11 @@ def main():
 
     # ---- blur has a floor, and is a real Gaussian ----
     sharp = framer.render(photo, framer.Params(blur=0), title, settings)
-    floored = framer.render(photo, framer.Params(blur=framer.BLUR_FLOOR), title, settings)
+    floored = framer.render(photo, framer.Params(blur=framer.BlurStyle.BLUR_FLOOR),
+                            title, settings)
     check("blur below the floor is clamped to it",
           sharp.tobytes() == floored.tobytes(),
-          f"blur=0 renders the same as blur={framer.BLUR_FLOOR:g}")
+          f"blur=0 renders the same as blur={framer.BlurStyle.BLUR_FLOOR:g}")
     strong = framer.render(photo, framer.Params(blur=60), title, settings)
     corner = lambda im: list(im.crop((0, 0, pad, pad)).convert("L").get_flattened_data())
     spread = lambda im: max(corner(im)) - min(corner(im))
@@ -237,17 +331,19 @@ def main():
           f"corner contrast {spread(floored)} -> {spread(strong)}")
 
     # ---- letter spacing widens the caption ----
-    font = framer.load_font(40, "Regular")
+    font = framer.FONTS.sans(40, "Regular")
     plain_width = font.getlength("DJI pocket 4")
-    tracked = framer.tracked_length(font, "DJI pocket 4", framer.TRACKING_EM * 40)
+    tracked = framer.tracked_length(font, "DJI pocket 4",
+                                    framer.BlurStyle.TRACKING_EM * 40)
     check("letter spacing widens the caption",
           tracked > plain_width and tracked < plain_width * 1.2,
-          f"{plain_width:.0f}px -> {tracked:.0f}px with {framer.TRACKING_EM:g}em tracking")
+          f"{plain_width:.0f}px -> {tracked:.0f}px with "
+          f"{framer.BlurStyle.TRACKING_EM:g}em tracking")
 
     # ---- type size is proportional to the photo, never fixed ----
     sizes = {}
     for side in (800, 1600, 4800):
-        rows = framer.caption_lines(p, title, settings, side)
+        rows = framer.Caption(p, title, settings, side).lines()
         sizes[side] = rows[0][0]["font"].size
     ratios = [size / side * 100 for side, size in sizes.items()]
     check("font size scales with the photo's short side",
@@ -255,13 +351,15 @@ def main():
           "  ".join(f"short {k}px -> {v}px type ({v / k * 100:.2f}%)"
                     for k, v in sizes.items()))
     check("the tuned title size is the expected fraction of the short side",
-          abs(sizes[4800] / 4800 * 100 - framer.TITLE_PCT) < 0.03,
-          f"{sizes[4800] / 4800 * 100:.2f}% vs {framer.TITLE_PCT}% (two-line default)")
-    one_line_row = framer.caption_lines(
-        framer.Params(one_line=True), title, settings, 4800)[0]
+          abs(sizes[4800] / 4800 * 100 - framer.BlurStyle.TITLE_PCT) < 0.03,
+          f"{sizes[4800] / 4800 * 100:.2f}% vs "
+          f"{framer.BlurStyle.TITLE_PCT}% (two-line default)")
+    one_line_row = framer.Caption(
+        framer.Params(one_line=True), title, settings, 4800).lines()[0]
+    one_line_pct = one_line_row[0]["font"].size / 4800 * 100
     check("the one-line layout uses its own smaller title size",
-          abs(one_line_row[0]["font"].size / 4800 * 100 - framer.TITLE_PCT_ONE) < 0.03,
-          f'{one_line_row[0]["font"].size / 4800 * 100:.2f}% vs {framer.TITLE_PCT_ONE}%')
+          abs(one_line_pct - framer.BlurStyle.TITLE_PCT_ONE) < 0.03,
+          f"{one_line_pct:.2f}% vs {framer.BlurStyle.TITLE_PCT_ONE}%")
 
     # a caption rendered on two different photo sizes occupies the same
     # fraction of the frame -- which is what makes the small preview faithful
@@ -269,7 +367,7 @@ def main():
     for side in (600, 3000):
         square_photo = Image.new("RGB", (side, side))
         box = framer.layout(square_photo.size, p, title, settings)
-        fractions.append(framer.caption_height(p, title, settings, side) / box["canvas"][1])
+        fractions.append(framer.Caption(p, title, settings, side).height() / box["canvas"][1])
     check("the caption keeps the same share of the canvas at any resolution",
           abs(fractions[0] - fractions[1]) < 0.003,
           f"{fractions[0] * 100:.2f}% vs {fractions[1] * 100:.2f}% of canvas height")
@@ -293,13 +391,15 @@ def main():
                                   {"brand": "DJI"}, "My camera") is None,
           "typing a maker gets its logo; typing anything else drops it")
     check("the maker's name is taken back off the front of the caption",
-          logos.split_leading("FUJIFILM  X-T5", "fujifilm") == ("fujifilm", "X-T5")
-          and logos.split_leading("NIKON CORPORATION  Z8") == ("nikon corporation", "Z8")
-          and logos.split_leading("Nikonos V") is None,
+          logos.LIBRARY.split_leading("FUJIFILM  X-T5", "fujifilm")
+          == ("fujifilm", "X-T5")
+          and logos.LIBRARY.split_leading("NIKON CORPORATION  Z8")
+          == ("nikon corporation", "Z8")
+          and logos.LIBRARY.split_leading("Nikonos V") is None,
           "and a word that merely starts with a maker's letters stays text")
 
-    marked = framer.caption_lines(p, "DJI  Pocket 4", settings, 1600, "dji")[0][0]
-    unmarked = framer.caption_lines(p, "DJI  Pocket 4", settings, 1600)[0][0]
+    marked = framer.Caption(p, "DJI  Pocket 4", settings, 1600, "dji").lines()[0][0]
+    unmarked = framer.Caption(p, "DJI  Pocket 4", settings, 1600).lines()[0][0]
     marks = [item for item, face, _ in marked["glyphs"] if face is None]
     check("the maker's name becomes one logo and the model stays type",
           len(marks) == 1
@@ -318,14 +418,15 @@ def main():
           marked["ascent"] >= image.height - below and marked["descent"] >= below,
           f'ascent {marked["ascent"]:.0f}px, descent {marked["descent"]:.0f}px')
 
-    small, large = logos.mark_mask("fujifilm", 40), logos.mark_mask("fujifilm", 400)
+    small = logos.LIBRARY.mask("fujifilm", 40)
+    large = logos.LIBRARY.mask("fujifilm", 400)
     check("the logo is filled at the size asked for, not scaled from a bitmap",
           abs(small.width / small.height - large.width / large.height) < 0.01
           and large.getextrema() == (0, 255),
           f"{small.size} and {large.size} share one aspect ratio")
 
     def subpaths(name):
-        letters, counters, _ = logos._mark_outline(name)
+        letters, counters, _ = logos.LIBRARY.outline(name)
         return len(letters), len(counters)
     letters, holes = subpaths("nikon")
     overlapping, none = subpaths("fujifilm")
@@ -344,19 +445,19 @@ def main():
     # ---- Chinese in the caption must not come out as tofu boxes ----
     # SF Pro carries no CJK glyphs; without a fallback face every Chinese
     # character renders as the identical .notdef box.
-    sf = framer.load_font(60, "Semibold")
+    sf = framer.FONTS.sans(60, "Semibold")
     check("the primary face is known not to cover CJK",
-          framer._covers(sf, "A") and not framer._covers(sf, "摄"))
-    check("the fallback face does cover CJK", framer._covers(framer.load_cjk_font(60), "摄"))
+          framer.FONTS.covers(sf, "A") and not framer.FONTS.covers(sf, "摄"))
+    check("the fallback face does cover CJK", framer.FONTS.covers(framer.FONTS.cjk(60), "摄"))
 
-    glyphs, width, _ = framer.plan_text("风光摄影", sf, framer.load_cjk_font(60), 1.8)
+    glyphs, width, _ = framer.plan_text("风光摄影", sf, framer.FONTS.cjk(60), 1.8)
     used = {font for _, font, _ in glyphs}
     check("Chinese characters are drawn with the fallback face",
           sf not in used and len(used) == 1 and width > 0,
           f"{len(glyphs)} glyphs, {width:.0f}px wide")
 
     mixed, mixed_width, metrics = framer.plan_text(
-        "DJI 风光", sf, framer.load_cjk_font(60), 1.8)
+        "DJI 风光", sf, framer.FONTS.cjk(60), 1.8)
     faces = {font.getname()[0] for char, font, _ in mixed if not char.isspace()}
     check("mixed Latin and Chinese each use their own face", len(faces) == 2,
           " + ".join(sorted(faces)))
@@ -371,6 +472,8 @@ def main():
     check("a Chinese caption renders different pixels than a Latin one",
           rendered["latin"].tobytes() != rendered["chinese"].tobytes())
 
+    bar_tests(photo, proxy, values)
+
     # ---- degenerate parameters must not crash ----
     for name, kw in [("tiny border", dict(border=0.1)),
                      ("huge border", dict(border=5.0)),
@@ -382,9 +485,22 @@ def main():
                      ("max blur", dict(blur=100)),
                      ("one line", dict(one_line=True)),
                      ("huge text", dict(text_scale=2.5)),
-                     ("empty caption", dict(title_auto=False, params_auto=False))]:
+                     ("empty caption", dict(title_auto=False, params_auto=False)),
+                     ("info bar", dict(style="bar")),
+                     ("info bar, narrowest band", dict(style="bar", bar_width=0.5)),
+                     ("info bar, widest band", dict(style="bar", bar_width=5.0)),
+                     ("info bar, huge type", dict(style="bar", bar_text_scale=5.0)),
+                     ("info bar, tiny type", dict(style="bar", bar_text_scale=0.5)),
+                     ("info bar, huge logo", dict(style="bar", bar_logo_scale=5.0)),
+                     ("info bar, black band", dict(style="bar", bar_color="black")),
+                     ("info bar, nothing to say",
+                      dict(style="bar", bar_params_auto=False, bar_lens_auto=False,
+                           bar_model_auto=False, bar_date_auto=False))]:
         try:
-            framer.render(proxy, framer.Params(**kw), title, settings)
+            edge = framer.Params(**kw)
+            framer.render(proxy, edge, title, settings,
+                          mark=framer.resolve_mark(edge, values),
+                          texts=framer.bar_texts(edge, values))
             check(f"edge case: {name}", True)
         except Exception as exc:
             check(f"edge case: {name}", False, f"{type(exc).__name__}: {exc}")

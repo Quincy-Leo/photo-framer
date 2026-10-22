@@ -7,7 +7,7 @@ const TOKEN = (window.FRAMER_TOKEN && window.FRAMER_TOKEN !== "__TOKEN__")
   : new URLSearchParams(location.search).get("t") || "";
 
 const $ = (id) => document.getElementById(id);
-const STORE_KEY = "photo-framer.params.v4";
+const STORE_KEY = "photo-framer.params.v5";
 
 const state = {
   session: null,
@@ -108,6 +108,7 @@ function switcher(spec) {
       state.params[spec.k] = value;
       buttons.forEach((b, i) => b.setAttribute("aria-pressed",
         String(spec.choices[i][0] === value)));
+      if (spec.onInput) spec.onInput(value);
       schedulePreview();
     });
     group.append(button);
@@ -197,60 +198,133 @@ function lightnessField(spec) {
   return { row, set: paint, paint };
 }
 
+/** A block of rows that only one border style shows. */
+function subgroup(host, style) {
+  const node = el("div", "sub");
+  node.dataset.style = style;
+  host.append(node);
+  return node;
+}
+
+function showStyle() {
+  const style = state.params.style || "blur";
+  document.querySelectorAll(".sub[data-style]").forEach((node) =>
+    node.classList.toggle("hidden", node.dataset.style !== style));
+}
+
+function addSliders(host, specs) {
+  for (const spec of specs) {
+    const control = slider(spec);
+    SETTERS[spec.k] = control.set;
+    host.append(control.row);
+  }
+}
+
+function addHint(host, text, title) {
+  const hint = el("p", "hint", text);
+  if (title) hint.title = title;
+  host.append(hint);
+  return hint;
+}
+
 const FORMAT_HINT = {
   png: "照片区域与原图逐位一致，ICC 与 EXIF 原样写入。体积最大。",
   jpeg: "质量 100、4:4:4 无色度抽样，ICC 与 EXIF 保留。肉眼无差，但非逐位无损。",
 };
+
+const BAR_FIELDS = [
+  { k: "bar_params", flagKey: "bar_params_auto", autoKey: "auto_bar_params",
+    label: "拍摄参数（左上）", placeholder: "50mm, F4.5, 1/125s, ISO100" },
+  { k: "bar_lens", flagKey: "bar_lens_auto", autoKey: "auto_bar_lens",
+    label: "镜头型号（左下）", placeholder: "NIKKOR Z DX 50-250mm f/4.5-6.3 VR" },
+  { k: "bar_model", flagKey: "bar_model_auto", autoKey: "auto_bar_model",
+    label: "相机型号（右上）", placeholder: "NIKON Z50II" },
+  { k: "bar_date", flagKey: "bar_date_auto", autoKey: "auto_bar_date",
+    label: "日期时间（右下）", placeholder: "2026-10-18 16:21" },
+];
+
 function buildPanel() {
   const look = $("g-look");
-  for (const spec of [
+  const kind = switcher({
+    k: "style", label: "边框类型", onInput: showStyle,
+    choices: [["blur", "模糊背景"], ["bar", "信息底框"]],
+  });
+  SETTERS.style = kind.set;
+  look.append(kind.row);
+
+  const lookBlur = subgroup(look, "blur");
+  addSliders(lookBlur, [
     { k: "border", label: "边框宽度", min: 0.1, max: 5, step: 0.1, unit: "x" },
     { k: "radius", label: "圆角", min: 0, max: 100, step: 1 },
     { k: "shadow", label: "阴影", min: 0, max: 100, step: 1 },
     { k: "blur", label: "模糊度", min: 3, max: 100, step: 1 },
-  ]) {
-    const control = slider(spec);
-    SETTERS[spec.k] = control.set;
-    look.append(control.row);
-  }
-  const hint = el("p", "hint", "三边等宽；下边框＝文字高＋一个边框宽，文字居中。");
-  hint.title = "下边框是文字高度加上一个边框宽度，这一个宽度平分到文字上下，"
-    + "所以文字上下的留白加起来正好等于其他三边。";
-  look.append(hint);
+  ]);
+  addHint(lookBlur, "三边等宽；下边框＝文字高＋一个边框宽，文字居中。",
+    "下边框是文字高度加上一个边框宽度，这一个宽度平分到文字上下，"
+    + "所以文字上下的留白加起来正好等于其他三边。");
+
+  const lookBar = subgroup(look, "bar");
+  const shade = switcher({
+    k: "bar_color", label: "底框颜色",
+    choices: [["white", "白"], ["black", "黑"]],
+  });
+  SETTERS.bar_color = shade.set;
+  lookBar.append(shade.row);
+  addSliders(lookBar, [
+    { k: "bar_width", label: "底框宽度", min: 0.5, max: 5, step: 0.1, unit: "x" },
+    { k: "bar_logo_scale", label: "LOGO 大小", min: 0.5, max: 5, step: 0.1, unit: "x" },
+  ]);
+  addHint(lookBar, "照片四边不留白，底框挂在下方，宽度按照片宽度比例计算。"
+    + "LOGO 和文字上下平齐后不再变大，需要调大底框宽度。");
 
   const text = $("g-text");
+  const textBlur = subgroup(text, "blur");
   const line = switcher({
     k: "one_line", label: "排版",
     choices: [[false, "两行"], [true, "一行"]],
   });
   SETTERS.one_line = line.set;
-  text.append(line.row);
+  textBlur.append(line.row);
 
-  const title = captionField({
-    k: "title", flagKey: "title_auto", autoKey: "auto_title",
-    label: "厂商 / 型号", placeholder: "打开照片后自动填充",
-  });
-  const settings = captionField({
-    k: "params_text", flagKey: "params_auto", autoKey: "auto_params",
-    label: "拍摄参数", placeholder: "焦距 | 光圈 | 快门 | ISO",
-  });
-  SETTERS.title = title.set;
-  SETTERS.params_text = settings.set;
-  state.refreshCaptions = () => { title.refresh(); settings.refresh(); };
-  const marks = el("p", "hint", "Nikon / DJI / FUJIFILM / Apple 出图显示 logo。");
-  marks.title = "按 EXIF 的厂商字段判断，出图时把标题里的厂商名换成 logo，比型号文字略高、"
-    + "同一条基线；手改标题后改按标题开头的文字判断，改掉厂商名就回到纯文字。";
-  text.append(title.row, marks, settings.row);
-
-  const size = slider({ k: "text_scale", label: "字号", min: 0.5, max: 2.5, step: 0.05, unit: "x" });
-  SETTERS.text_scale = size.set;
-  text.append(size.row);
-
+  const fields = [
+    captionField({
+      k: "title", flagKey: "title_auto", autoKey: "auto_title",
+      label: "厂商 / 型号", placeholder: "打开照片后自动填充",
+    }),
+    captionField({
+      k: "params_text", flagKey: "params_auto", autoKey: "auto_params",
+      label: "拍摄参数", placeholder: "焦距 | 光圈 | 快门 | ISO",
+    }),
+  ];
+  SETTERS.title = fields[0].set;
+  SETTERS.params_text = fields[1].set;
+  textBlur.append(fields[0].row);
+  addHint(textBlur, "Nikon / DJI / FUJIFILM / Apple 出图显示 logo。",
+    "按 EXIF 的厂商字段判断，出图时把标题里的厂商名换成 logo，比型号文字略高、"
+    + "同一条基线；手改标题后改按标题开头的文字判断，改掉厂商名就回到纯文字。");
+  textBlur.append(fields[1].row);
+  addSliders(textBlur, [
+    { k: "text_scale", label: "字号", min: 0.5, max: 2.5, step: 0.05, unit: "x" },
+  ]);
   const light = lightnessField({ label: "文字明暗" });
   SETTERS.text_light = light.set;
   state.paintLight = light.paint;
-  text.append(light.row);
+  textBlur.append(light.row);
 
+  const textBar = subgroup(text, "bar");
+  for (const spec of BAR_FIELDS) {
+    const field = captionField(spec);
+    SETTERS[spec.k] = field.set;
+    fields.push(field);
+    textBar.append(field.row);
+  }
+  addSliders(textBar, [
+    { k: "bar_text_scale", label: "字号", min: 0.5, max: 5, step: 0.1, unit: "x" },
+  ]);
+  addHint(textBar, "清空一行即不显示该行。文字颜色随底框自动取黑或白；"
+    + "字号排满整行后不再变大。");
+
+  state.refreshCaptions = () => fields.forEach((field) => field.refresh());
   buildExportGroup();
 }
 
@@ -280,6 +354,7 @@ function buildExportGroup() {
 
 function applyParams() {
   for (const [key, set] of Object.entries(SETTERS)) set(state.params[key]);
+  showStyle();
   persist();
 }
 
@@ -393,6 +468,13 @@ function human(bytes) {
   return bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.round(bytes / 1e3)} KB`;
 }
 
+/** Which caption fields the batch will refill from each photo's own EXIF. */
+function followed(names) {
+  return names.length
+    ? `${names.join("、")}按每张照片自己的 EXIF 填充`
+    : "文字全部用你手改的内容";
+}
+
 async function doExport() {
   const button = $("export");
   button.disabled = true;
@@ -430,13 +512,12 @@ async function doBatch() {
   const { count } = await api(`/api/scan?folder=${encodeURIComponent(folder)}`, { method: "GET" });
   if (!count) { say("该文件夹里没有可读的图片。", "bad"); return; }
 
-  const followed = [
-    state.params.title_auto ? "厂商型号" : null,
-    state.params.params_auto ? "拍摄参数" : null,
-  ].filter(Boolean);
-  const textNote = followed.length
-    ? `${followed.join("、")}按每张照片自己的 EXIF 填充`
-    : "文字全部用你手改的内容";
+  const following = (state.params.style === "bar"
+    ? [[state.params.bar_params_auto, "拍摄参数"], [state.params.bar_lens_auto, "镜头型号"],
+       [state.params.bar_model_auto, "相机型号"], [state.params.bar_date_auto, "日期时间"]]
+    : [[state.params.title_auto, "厂商型号"], [state.params.params_auto, "拍摄参数"]]
+  ).filter(([on]) => on).map(([, name]) => name);
+  const textNote = followed(following);
   if (!confirm(`将用当前参数处理 ${count} 张照片\n\n来源：${folder}\n输出：${folder.replace(/\/$/, "")}/framed/\n格式：${state.format.toUpperCase()}\n文字：${textNote}\n\n继续？`)) return;
 
   state.job = await api("/api/batch", {

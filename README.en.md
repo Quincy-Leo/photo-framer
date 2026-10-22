@@ -7,22 +7,37 @@ English · [简体中文](README.md)
 Wrap a photo in a good-looking frame that carries its shooting data. The
 photo itself comes out completely untouched.
 
-![UI](assets/ui.png)
+![UI](assets/example-ui.png)
 
-Six fine-tuning sliders: border width, corner radius, shadow, blur, type
-size, text lightness.
+Two border styles, switched under 外观 · 边框类型 (Look · Border style):
 
-The caption is fixed in shape — maker and model, plus the exposure settings
-— and can be shown on one line or two. The maker names of Nikon, DJI,
-FUJIFILM and Apple print as a vector logo. The photo's pixels, its colour
-profile and its EXIF all survive as they were.
+- **Blurred backdrop** (模糊背景): the photo sits on a blurred, zoomed copy of
+  itself with a margin all round, and the caption runs along the bottom. Six
+  sliders: border width, corner radius, shadow, blur, type size, text
+  lightness.
+- **Info bar** (信息底框): the photo keeps its own edges and a flat white or
+  black band hangs below it — logo, exposure settings and lens name on the
+  left, body name and date on the right. Three sliders and a switch: band
+  width, logo size, type size, band colour.
 
-Results, one-line and two-line (the images shown in this README are scaled
-down):
+Either way the text is filled in from EXIF and can be edited field by field.
+The maker names of Nikon, DJI, FUJIFILM and Apple print as a vector logo. The
+photo's pixels, its colour profile and its EXIF all survive as they were.
 
-![One line](assets/example.jpg)
+All three results below come from `assets/example.JPG` (the images shown in
+this README are scaled down):
+
+Blurred backdrop, one line:
+
+![One line](assets/example-one-line.jpg)
+
+Blurred backdrop, two lines:
 
 ![Two lines](assets/example-two-line.jpg)
+
+Info bar:
+
+![Info bar](assets/example-bottom-border.jpg)
 
 ## Running it
 
@@ -37,7 +52,7 @@ shuts it down.
 
 Pillow (≥ 10) is the only dependency; `start.command` installs it if it is
 missing. The font paths and the native file picker are macOS-specific — on
-another platform you will need to change the font constants at the top of
+another platform you will need to change the font constants in `FontBook` in
 `framer.py` and `native_pick()` in `server.py`.
 
 The interface itself is in Chinese only; where this document names a button
@@ -65,6 +80,28 @@ disk.
 
 ## Controls
 
+Settings persist in localStorage, so they are still there next time.
+`重置` (Reset) restores the defaults.
+
+### Info bar
+
+| Control | Range | Notes |
+|---|---|---|
+| Band colour | white / black, default white | the text takes the opposite one automatically |
+| Band width | 0.5 – 5.0 ×, step 0.1 | 1.0 is the tuned base height (9.25% of the photo's width) |
+| Logo size | 0.5 – 5.0 ×, step 0.1 | stops growing once it stands level with the type; widen the band for more |
+| Type size | 0.5 – 5.0 ×, step 0.1 | scales both lines; stops growing once the row is full |
+
+Four text fields, one per corner of the band: exposure settings top left,
+lens name bottom left, body name top right, date bottom right. Empty a field
+and that line is left out. The `Z` of a Nikon Z body is set the way Nikon
+writes it.
+
+For a maker with no logo (Canon, Sony and so on) the left-hand column simply
+starts with the exposure settings.
+
+### Blurred backdrop
+
 Six sliders, plus the caption text and a layout switch. The finer
 proportions are already tuned by eye and are not exposed.
 
@@ -76,9 +113,6 @@ proportions are already tuned by eye and are not exposed.
 | Blur | 3 – 100, default 25 | Gaussian; the dial × 0.12% is the radius as a share of the short edge |
 | Type size | 0.5 – 2.5 × | scales both lines; 1.0 is the tuned base size |
 | Text lightness | 0 – 100, or automatic | see below |
-
-Settings persist in localStorage, so they are still there next time.
-`重置` (Reset) restores the defaults.
 
 ### The frame
 
@@ -102,6 +136,10 @@ the photo's short edge — the default of 25 means 3% (about 83 px on a
 
 ## The caption
 
+What follows is the **blurred backdrop**'s caption; the info bar's four
+fields are described under "Info bar" above. Maker logos, Chinese text and
+text lightness apply to both styles.
+
 Two fixed groups: **maker  model** (two spaces between them), and
 **focal | aperture | shutter | ISO**, pipe separated. A non-zero exposure
 compensation adds `+0.3EV` on the end; a zero one is left out. Two lines by
@@ -115,11 +153,12 @@ Two lines (default)         NIKON  z5_2
 ```
 
 Maker and model are printed **exactly as the EXIF spells them**, with no
-case folding: `Nikon` stays `Nikon`, `FUJIFILM` stays `FUJIFILM`. Only two
+case folding: `Nikon` stays `Nikon`, `FUJIFILM` stays `FUJIFILM`. Only three
 things are cleaned up — the corporate suffix some makers append
-(`NIKON CORPORATION` → `NIKON`) and the brand prefix cameras repeat in the
-model field (`FUJIFILM X-T5` → `X-T5`). Four makers get a logo instead of
-their name; see below.
+(`NIKON CORPORATION` → `NIKON`), the brand prefix cameras repeat in the
+model field (`FUJIFILM X-T5` → `X-T5`), and the way Nikon writes a mark
+number (`Z50_2` → `Z50II`, which is what is printed on the body). Four
+makers get a logo instead of their name; see below.
 
 ### Maker logos
 
@@ -148,7 +187,7 @@ follow the typography:
    inside `Model` (`NIKON D850`).
 
 To add a maker logo, add a line to `MARKS` in `logos.py` — an SVG file name
-and the two alignment numbers.
+and the three alignment numbers: height, baseline drop, horizontal stretch.
 
 ### Type size
 
@@ -226,7 +265,7 @@ onto the window
 ## Tests
 
 ```bash
-python3 tests/test_lossless.py   # renderer: bit-exactness, frame rule, EXIF/EV, tracking, CJK fallback, maker logos, auto colour, extreme settings
+python3 tests/test_lossless.py   # renderer: bit-exactness, frame rule, info bar, EXIF/EV, tracking, CJK fallback, maker logos, auto colour, extreme settings
 python3 tests/test_server.py     # HTTP layer: auth, preview, download-style export, batch, keep-alive framing
 ```
 
@@ -247,13 +286,14 @@ generate their own images.
 | `server.py` | the local HTTP service. Binds 127.0.0.1 only; every `/api/` call checks a single-run token |
 | `static/` | the interface |
 | `assets/logos/` | the four makers' logos, as vectors |
-| `assets/` | the screenshot and example output used by the README |
+| `assets/` | the screenshot and example output used by the README, and `example.JPG` they were made from |
 
 `framer.py` works directly as a library:
 
 ```python
 import framer
 framer.render_file("a.jpg", framer.Params(border=1.5, radius=40, one_line=True), "png")
+framer.render_file("a.jpg", framer.Params(style="bar", bar_color="black"), "png")
 ```
 
 ## Security
@@ -264,11 +304,12 @@ it. It can, though, read and write anywhere your user account can — that is
 how the file pickers work. Treat it as a local tool and do not expose the
 port.
 
-A photo dropped onto the window is copied into `.temp/` inside the checkout
+A photo dropped onto the window is copied into `.tmp/` inside the checkout
 rather than a system temp directory, so the cache cannot scatter somewhere
-you are not looking. Files older than a day are swept at startup, and
-`.gitignore` keeps the directory out of commits. To clear it completely,
-`rm -rf .temp`.
+you are not looking. Copies the server made itself and has not touched for a
+day are swept at startup — only those, so anything else you leave in that
+directory stays put. `.gitignore` keeps the directory out of commits. To
+clear it completely, `rm -rf .tmp`.
 
 ## Licence
 

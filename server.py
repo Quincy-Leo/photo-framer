@@ -1,18 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 QuincyLeo
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Local web UI for the photo framer.
-
-Preview and export are deliberately split: the browser gets a small JPEG
-proxy so sliders feel immediate, while every export is rendered from the
-untouched original by framer.py.  Nothing the browser does can degrade the
-exported photo.
-
-The server binds to 127.0.0.1 only and all /api/ calls require the one-time
-token printed in the launch URL, so another page in your browser cannot drive
-it.  It does read and write files anywhere your user account can -- that is
-the point of the file pickers -- so treat it as a local tool, not a service.
-"""
+"""Local HTTP interface for the photo framer."""
 
 from __future__ import annotations
 
@@ -27,6 +16,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -34,25 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import framer
 from framer import Params
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-STATIC = os.path.join(HERE, "static")
-TOKEN = secrets.token_urlsafe(16)
-# Dropped photos are staged inside the checkout, not in a system temp
-# directory, so the cache can never leak somewhere the user isn't looking.
-# .gitignore keeps it out of commits; stale files are swept at startup.
-CACHE_DIR = os.path.join(HERE, ".tmp")
-# ... and only files this server itself wrote are ever swept: a staged upload
-# is named <8 hex>-<original name>, and anything else in the folder is
-# somebody's own file that happens to be sitting there.
-STAGED_NAME = re.compile(r"^[0-9a-f]{8}-")
-MAX_UPLOAD = 400 * 1024 * 1024
-MAX_SESSIONS = 4
-PREVIEW_LONG_SIDE = 1024
-
-
-# --------------------------------------------------------------------------
-# sessions
-# --------------------------------------------------------------------------
 
 class SessionStore:
     """The photos open in the browser right now, the newest-touched kept.
@@ -63,6 +34,9 @@ class SessionStore:
     preview would queue behind whatever large file someone just opened.
     """
 
+    MAX_SESSIONS = 4
+    PREVIEW_LONG_SIDE = 1024
+
     def __init__(self, limit=MAX_SESSIONS):
         self._limit = limit
         self._sessions = {}
@@ -72,15 +46,15 @@ class SessionStore:
         path = os.path.abspath(os.path.expanduser(path))
         if not os.path.isfile(path):
             raise FileNotFoundError(path)
-        photo, info = framer.load_source(path)
-        values = framer.exif_values(photo, path)
+        photo, info = framer.ImageSource.load(path)
+        values = framer.ExifMetadata.read(photo, path)
         session = {
             "id": uuid.uuid4().hex[:12],
             "path": path,
             "photo": photo,
             "info": info,
             "values": values,
-            "proxy": framer.downscale_for_preview(photo, PREVIEW_LONG_SIDE),
+            "proxy": framer.ImageSource.preview(photo, self.PREVIEW_LONG_SIDE),
             "touched": time.time(),
         }
         with self._lock:
@@ -102,110 +76,122 @@ class SessionStore:
             raise KeyError("session expired, please reopen the photo")
         return session
 
+    @staticmethod
+    def summary(session):
+        photo, info = session["photo"], session["info"]
+        icc = info.get("icc_profile")
+        name = ""
+        if icc:
+            try:
+                from PIL import ImageCms
+                name = ImageCms.getProfileDescription(ImageCms.ImageCmsProfile(io.BytesIO(icc))).strip()
+            except Exception:
+                name = f"{len(icc)} bytes"
+        summary = {
+            "id": session["id"],
+            "path": session["path"],
+            "name": os.path.basename(session["path"]),
+            "width": photo.width,
+            "height": photo.height,
+            "megapixels": round(photo.width * photo.height / 1e6, 1),
+            "format": info.get("source_format") or "",
+            "icc": name,
+            "has_exif": bool(info.get("exif_raw") and len(info["exif_raw"])),
+            "orientation": info.get("orientation", 1),
+            "converted": info.get("converted", False),
+            "source_mode": info.get("source_mode", ""),
+            "bit_depth": info.get("bit_depth", 8),
+            "values": session["values"],
+            "auto_title": framer.CaptionContent.auto_title(session["values"]),
+            "auto_params": framer.CaptionContent.auto_params(session["values"]),
+        }
+        # what each info-bar field shows while it is still following the EXIF
+        for slot, auto in framer.CaptionContent.bar_slots().items():
+            summary[f"auto_bar_{slot}"] = auto(session["values"])
+        return summary
 
-SESSIONS = SessionStore()
+    def preview(self, session_id, params, overrides=None):
+        """Render the UI preview and report its full-resolution canvas."""
+        session = self.get(session_id)
+        values = session["values"] | (overrides or {})
+        title, settings = framer.CaptionContent.resolve_texts(params, values)
+        texts = framer.CaptionContent.bar_texts(params, values)
+        mark = framer.CaptionContent.resolve_mark(params, values, title, texts)
+        report = {}
+        image = framer.FrameRenderer.render(
+            session["proxy"], params, title, settings, report, mark, texts)
+        buffer = io.BytesIO()
+        image.save(buffer, "JPEG", quality=84, subsampling=1, optimize=False)
+        full = framer.FrameRenderer.layout(
+            session["photo"].size, params, title, settings, mark, texts)["canvas"]
+        return buffer.getvalue(), {
+            "X-Canvas": f"{full[0]}x{full[1]}",
+            "X-Text-Light": f"{report.get('text_light', params.text_light):.0f}",
+        }
 
 
-def session_summary(session):
-    photo, info = session["photo"], session["info"]
-    icc = info.get("icc_profile")
-    name = ""
-    if icc:
+class NativeDialogs:
+    """macOS file selection and Finder integration."""
+
+    @staticmethod
+    def pick(mode):
+        if mode == "folder":
+            script = 'POSIX path of (choose folder with prompt "选择照片文件夹")'
+        else:
+            script = ('POSIX path of (choose file with prompt "选择照片" '
+                      'of type {"public.image"})')
         try:
-            from PIL import ImageCms
-            name = ImageCms.getProfileDescription(ImageCms.ImageCmsProfile(io.BytesIO(icc))).strip()
-        except Exception:
-            name = f"{len(icc)} bytes"
-    summary = {
-        "id": session["id"],
-        "path": session["path"],
-        "name": os.path.basename(session["path"]),
-        "width": photo.width,
-        "height": photo.height,
-        "megapixels": round(photo.width * photo.height / 1e6, 1),
-        "format": info.get("source_format") or "",
-        "icc": name,
-        "has_exif": bool(info.get("exif_raw") and len(info["exif_raw"])),
-        "orientation": info.get("orientation", 1),
-        "converted": info.get("converted", False),
-        "source_mode": info.get("source_mode", ""),
-        "bit_depth": info.get("bit_depth", 8),
-        "values": session["values"],
-        "auto_title": framer.auto_title(session["values"]),
-        "auto_params": framer.auto_params(session["values"]),
-    }
-    # what each info-bar field shows while it is still following the EXIF
-    for slot, auto in framer.BAR_SLOTS.items():
-        summary[f"auto_bar_{slot}"] = auto(session["values"])
-    return summary
+            done = subprocess.run(["osascript", "-e", script], capture_output=True,
+                                  text=True, timeout=600)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, str(exc)
+        if done.returncode != 0:
+            detail = (done.stderr or "").strip()
+            return None, "" if "cancel" in detail.lower() else detail
+        return done.stdout.strip() or None, ""
+
+    @staticmethod
+    def reveal(path):
+        if os.path.exists(path):
+            subprocess.Popen(["open", "-R", path])
 
 
-# --------------------------------------------------------------------------
-# native macOS pickers
-# --------------------------------------------------------------------------
+class UploadCache:
+    """Stage dropped photos and remove expired staged uploads."""
 
-def native_pick(mode):
-    if mode == "folder":
-        script = 'POSIX path of (choose folder with prompt "选择照片文件夹")'
-    else:
-        script = ('POSIX path of (choose file with prompt "选择照片" '
-                  'of type {"public.image"})')
-    try:
-        done = subprocess.run(["osascript", "-e", script], capture_output=True,
-                              text=True, timeout=600)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, str(exc)
-    if done.returncode != 0:
-        detail = (done.stderr or "").strip()
-        return None, "" if "cancel" in detail.lower() else detail
-    return done.stdout.strip() or None, ""
+    STAGED_NAME = re.compile(r"^[0-9a-f]{8}-")
 
+    def __init__(self, directory):
+        self.directory = directory
 
-def reveal(path):
-    if os.path.exists(path):
-        subprocess.Popen(["open", "-R", path])
+    def stage(self, payload, filename):
+        name = os.path.basename(filename or "dropped.jpg")
+        os.makedirs(self.directory, exist_ok=True)
+        target = os.path.join(self.directory, f"{uuid.uuid4().hex[:8]}-{name}")
+        with open(target, "wb") as handle:
+            handle.write(payload)
+        return target
 
+    def sweep(self, max_age=86400):
+        """Dropped photos are copied into .tmp/; drop yesterday's leftovers.
 
-def sweep_cache(max_age=86400):
-    """Dropped photos are copied into .tmp/; drop yesterday's leftovers.
-
-    Only this server's own staged copies are touched -- never a file someone
-    put in the folder themselves.
-    """
-    cutoff = time.time() - max_age
-    try:
-        names = os.listdir(CACHE_DIR)
-    except OSError:
-        return
-    for name in names:
-        if not STAGED_NAME.match(name):
-            continue
-        full = os.path.join(CACHE_DIR, name)
+        Only this server's own staged copies are touched -- never a file someone
+        put in the folder themselves.
+        """
+        cutoff = time.time() - max_age
         try:
-            if os.path.isfile(full) and os.path.getmtime(full) < cutoff:
-                os.remove(full)
+            names = os.listdir(self.directory)
         except OSError:
-            pass
-
-
-# --------------------------------------------------------------------------
-# batch jobs
-# --------------------------------------------------------------------------
-
-def list_images(folder):
-    folder = os.path.abspath(os.path.expanduser(folder))
-    try:
-        entries = sorted(os.listdir(folder), key=str.lower)
-    except OSError:
-        return []
-    out = []
-    for entry in entries:
-        if entry.startswith("."):
-            continue
-        full = os.path.join(folder, entry)
-        if os.path.isfile(full) and os.path.splitext(entry)[1].lower() in framer.READABLE_EXT:
-            out.append(full)
-    return out
+            return
+        for name in names:
+            if not self.STAGED_NAME.match(name):
+                continue
+            full = os.path.join(self.directory, name)
+            try:
+                if os.path.isfile(full) and os.path.getmtime(full) < cutoff:
+                    os.remove(full)
+            except OSError:
+                pass
 
 
 class JobRegistry:
@@ -228,7 +214,7 @@ class JobRegistry:
         return {k: v for k, v in job.items() if k != "cancel"}
 
     def start(self, folder, params, fmt, out_dir, overrides):
-        files = list_images(folder)
+        files = self.list_images(folder)
         base = os.path.abspath(os.path.expanduser(folder))
         job = {"id": uuid.uuid4().hex[:12], "total": len(files), "done": 0,
                "written": [], "errors": [], "finished": not files, "current": "",
@@ -239,25 +225,11 @@ class JobRegistry:
             for old in stale:
                 self._jobs.pop(old["id"], None)
 
-        def run():
-            for path in files:
-                if job["cancel"]:
-                    break
-                job["current"] = os.path.basename(path)
-                try:
-                    written, _ = framer.render_file(path, params, fmt,
-                                                    out_dir=job["out_dir"],
-                                                    overrides=overrides)
-                    job["written"].append(written)
-                except Exception as exc:
-                    job["errors"].append(
-                        f"{os.path.basename(path)}: {type(exc).__name__}: {exc}")
-                job["done"] += 1
-            job["current"] = ""
-            job["finished"] = True
 
         if files:
-            threading.Thread(target=run, daemon=True).start()
+            threading.Thread(target=self._run,
+                             args=(job, files, params, fmt, overrides),
+                             daemon=True).start()
         with self._lock:
             return self._public(job)
 
@@ -275,31 +247,102 @@ class JobRegistry:
                 job["cancel"] = True
             return bool(job)
 
+    def _run(self, job, files, params, fmt, overrides):
+        for path in files:
+            if job["cancel"]:
+                break
+            job["current"] = os.path.basename(path)
+            try:
+                written, _ = framer.PhotoFramer.render_file(path, params, fmt,
+                                                out_dir=job["out_dir"],
+                                                overrides=overrides)
+                job["written"].append(written)
+            except Exception as exc:
+                job["errors"].append(
+                    f"{os.path.basename(path)}: {type(exc).__name__}: {exc}")
+            job["done"] += 1
+        job["current"] = ""
+        job["finished"] = True
 
-JOBS = JobRegistry()
+    @staticmethod
+    def list_images(folder):
+        folder = os.path.abspath(os.path.expanduser(folder))
+        try:
+            entries = sorted(os.listdir(folder), key=str.lower)
+        except OSError:
+            return []
+        out = []
+        for entry in entries:
+            if entry.startswith("."):
+                continue
+            full = os.path.join(folder, entry)
+            if os.path.isfile(full) and os.path.splitext(entry)[1].lower() in framer.ImageSource.READABLE_EXT:
+                out.append(full)
+        return out
 
 
-# --------------------------------------------------------------------------
-# HTTP
-# --------------------------------------------------------------------------
+class ServerApplication:
+    """Own the sessions, batch jobs and uploads for one local server."""
 
-CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
-                 ".ico": "image/x-icon", ".json": "application/json"}
+    def __init__(self, root=None):
+        self.root = root or os.path.dirname(os.path.abspath(__file__))
+        self.static = os.path.join(self.root, "static")
+        self.token = secrets.token_urlsafe(16)
+        self.sessions = SessionStore()
+        self.jobs = JobRegistry()
+        self.cache = UploadCache(os.path.join(self.root, ".tmp"))
+        self.desktop = NativeDialogs()
 
-MIME_FOR_FORMAT = {"png": "image/png", "jpeg": "image/jpeg", "tiff": "image/tiff"}
+    def create_server(self, address):
+        return ThreadingHTTPServer(
+            address, partial(Handler, application=self))
 
-
-def _ascii_name(name):
-    """A plain-ASCII fallback for the Content-Disposition filename."""
-    stripped = name.encode("ascii", "ignore").decode().replace('"', "")
-    return stripped or "framed.png"
+    def run(self):
+        self.cache.sweep()
+        port = int(os.environ.get("FRAMER_PORT", "8787"))
+        server = None
+        for candidate in range(port, port + 20):
+            try:
+                server = self.create_server(("127.0.0.1", candidate))
+                port = candidate
+                break
+            except OSError:
+                continue
+        if server is None:
+            print("no free port in range", file=sys.stderr)
+            return 1
+        url = f"http://127.0.0.1:{port}/?t={self.token}"
+        opening = [a for a in sys.argv[1:] if not a.startswith("-")]
+        if opening:
+            url += "&open=" + quote(os.path.abspath(os.path.expanduser(opening[0])))
+        print("照片加边框工具已启动")
+        print(f"  {url}")
+        print("  Ctrl-C 退出")
+        print("  photo-framer  Copyright (C) 2026 QuincyLeo  ·  GPL-3.0-or-later, 无任何担保\n")
+        if "--no-browser" not in sys.argv:
+            threading.Timer(0.4, webbrowser.open, (url,)).start()
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n已退出")
+        return 0
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "PhotoFramer"
     protocol_version = "HTTP/1.1"
     raw_body = b""
+    MAX_UPLOAD = 400 * 1024 * 1024
+    CONTENT_TYPES = {
+        ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+        ".ico": "image/x-icon", ".json": "application/json",
+    }
+    MIME_FOR_FORMAT = {"png": "image/png", "jpeg": "image/jpeg", "tiff": "image/tiff"}
+
+    def __init__(self, *args, application=None, **kwargs):
+        self.app = application if application is not None else APPLICATION
+        super().__init__(*args, **kwargs)
 
     def log_message(self, fmt, *args):  # quieter console
         if "/api/preview" not in (self.path or ""):
@@ -324,7 +367,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_UPLOAD:
+        if length > self.MAX_UPLOAD:
             raise ValueError("payload too large")
         return self.rfile.read(length) if length else b""
 
@@ -336,48 +379,48 @@ class Handler(BaseHTTPRequestHandler):
         if origin and urlparse(origin).hostname not in ("127.0.0.1", "localhost", "::1"):
             return False
         supplied = self.headers.get("X-Framer-Token") or (query.get("t") or [""])[0]
-        return secrets.compare_digest(supplied, TOKEN)
+        return secrets.compare_digest(supplied, self.app.token)
 
     # -- routing ----------------------------------------------------------
     def do_GET(self):
         route = urlparse(self.path)
         query = parse_qs(route.query)
         if route.path in ("/", "/index.html"):
-            return self._file(os.path.join(STATIC, "index.html"),
-                              inject=b'"__TOKEN__"', value=json.dumps(TOKEN).encode())
+            return self._file(os.path.join(self.app.static, "index.html"),
+                              inject=b'"__TOKEN__"', value=json.dumps(self.app.token).encode())
         if route.path.startswith("/static/"):
             name = os.path.basename(route.path)
-            return self._file(os.path.join(STATIC, name))
+            return self._file(os.path.join(self.app.static, name))
         if route.path == "/favicon.ico":
             return self._send(204)
         if not self._authorised(query):
             return self._json({"error": "unauthorised"}, 403)
         if route.path == "/api/pick":
-            path, error = native_pick((query.get("mode") or ["file"])[0])
+            path, error = self.app.desktop.pick((query.get("mode") or ["file"])[0])
             if error:
                 return self._json({"error": error}, 500)
             return self._json({"path": path})
         if route.path == "/api/batch":
-            report = JOBS.report((query.get("job") or [""])[0])
+            report = self.app.jobs.report((query.get("job") or [""])[0])
             if report is None:
                 return self._json({"error": "unknown job"}, 404)
             return self._json(report)
         if route.path == "/api/scan":
             folder = (query.get("folder") or [""])[0]
-            files = list_images(folder)
+            files = self.app.jobs.list_images(folder)
             return self._json({"count": len(files),
                                "names": [os.path.basename(f) for f in files[:200]]})
         return self._json({"error": "not found"}, 404)
 
     def _file(self, path, inject=None, value=None):
-        if not os.path.isfile(path) or not os.path.abspath(path).startswith(STATIC):
+        if not os.path.isfile(path) or not os.path.abspath(path).startswith(self.app.static):
             return self._json({"error": "not found"}, 404)
         with open(path, "rb") as handle:
             body = handle.read()
         if inject:
             body = body.replace(inject, value)
         ext = os.path.splitext(path)[1].lower()
-        self._send(200, body, CONTENT_TYPES.get(ext, "application/octet-stream"))
+        self._send(200, body, self.CONTENT_TYPES.get(ext, "application/octet-stream"))
 
     def do_POST(self):
         route = urlparse(self.path)
@@ -415,37 +458,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _load(self):
         data = self._payload()
-        self._json(session_summary(SESSIONS.open(data.get("path", ""))))
+        self._json(self.app.sessions.summary(self.app.sessions.open(data.get("path", ""))))
 
     def _upload(self):
-        name = os.path.basename(self.headers.get("X-Filename") or "dropped.jpg")
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        target = os.path.join(CACHE_DIR, f"{uuid.uuid4().hex[:8]}-{name}")
-        with open(target, "wb") as handle:
-            handle.write(self.raw_body)
-        summary = session_summary(SESSIONS.open(target))
+        target = self.app.cache.stage(
+            self.raw_body, self.headers.get("X-Filename"))
+        summary = self.app.sessions.summary(self.app.sessions.open(target))
         summary["temporary"] = True
         self._json(summary)
 
     def _preview(self):
         data = self._payload()
-        session = SESSIONS.get(data.get("id", ""))
-        params = Params.from_dict(data.get("params"))
-        values = session["values"] | (data.get("overrides") or {})
-        title, settings = framer.resolve_texts(params, values)
-        texts = framer.bar_texts(params, values)
-        mark = framer.resolve_mark(params, values, title, texts)
-        report = {}
-        image = framer.render(session["proxy"], params, title, settings, report, mark,
-                              texts)
-        buffer = io.BytesIO()
-        image.save(buffer, "JPEG", quality=84, subsampling=1, optimize=False)
-        full = framer.layout(session["photo"].size, params, title, settings, mark,
-                             texts)["canvas"]
-        self._send(200, buffer.getvalue(), "image/jpeg", {
-            "X-Canvas": f"{full[0]}x{full[1]}",
-            "X-Text-Light": f"{report.get('text_light', params.text_light):.0f}",
-        })
+        payload, headers = self.app.sessions.preview(
+            data.get("id", ""), Params.from_dict(data.get("params")),
+            data.get("overrides"))
+        self._send(200, payload, "image/jpeg", headers)
 
     def _export(self):
         """Render at full resolution and hand the bytes to the browser.
@@ -455,16 +482,16 @@ class Handler(BaseHTTPRequestHandler):
         nothing on the way re-encodes the image.
         """
         data = self._payload()
-        session = SESSIONS.get(data.get("id", ""))
+        session = self.app.sessions.get(data.get("id", ""))
         params = Params.from_dict(data.get("params"))
         fmt = (data.get("format") or "png").lower()
         started = time.time()
-        payload, size = framer.render_bytes(session["path"], params, fmt,
+        payload, size = framer.PhotoFramer.render_bytes(session["path"], params, fmt,
                                             overrides=data.get("overrides") or {})
-        name = framer.output_name(session["path"], fmt)
+        name = framer.ImageExporter.output_name(session["path"], fmt)
         quoted = quote(name, safe="")
-        self._send(200, payload, MIME_FOR_FORMAT.get(fmt, "application/octet-stream"), {
-            "Content-Disposition": f"attachment; filename=\"{_ascii_name(name)}\"; "
+        self._send(200, payload, self.MIME_FOR_FORMAT.get(fmt, "application/octet-stream"), {
+            "Content-Disposition": f"attachment; filename=\"{self._ascii_name(name)}\"; "
                                    f"filename*=UTF-8''{quoted}",
             "X-Filename": quoted,
             "X-Dimensions": f"{size[0]}x{size[1]}",
@@ -479,51 +506,50 @@ class Handler(BaseHTTPRequestHandler):
         out_dir = data.get("out_dir") or None
         if out_dir:
             out_dir = os.path.abspath(os.path.expanduser(out_dir))
-        job = JOBS.start(folder, Params.from_dict(data.get("params")),
+        job = self.app.jobs.start(folder, Params.from_dict(data.get("params")),
                          (data.get("format") or "png").lower(), out_dir,
                          data.get("overrides") or {})
         self._json(job)
 
     def _cancel(self):
-        self._json({"ok": JOBS.cancel(self._payload().get("job", ""))})
+        self._json({"ok": self.app.jobs.cancel(self._payload().get("job", ""))})
 
     def _reveal(self):
-        reveal(os.path.abspath(os.path.expanduser(self._payload().get("path", ""))))
+        path = os.path.abspath(os.path.expanduser(self._payload().get("path", "")))
+        self.app.desktop.reveal(path)
         self._json({"ok": True})
 
     def _defaults(self):
         self._json({"params": Params().to_dict()})
 
+    @staticmethod
+    def _ascii_name(name):
+        """A plain-ASCII fallback for the Content-Disposition filename."""
+        stripped = name.encode("ascii", "ignore").decode().replace('"', "")
+        return stripped or "framed.png"
 
-def main():
-    sweep_cache()
-    port = int(os.environ.get("FRAMER_PORT", "8787"))
-    server = None
-    for candidate in range(port, port + 20):
-        try:
-            server = ThreadingHTTPServer(("127.0.0.1", candidate), Handler)
-            port = candidate
-            break
-        except OSError:
-            continue
-    if server is None:
-        print("no free port in range", file=sys.stderr)
-        return 1
-    url = f"http://127.0.0.1:{port}/?t={TOKEN}"
-    opening = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if opening:
-        url += "&open=" + quote(os.path.abspath(os.path.expanduser(opening[0])))
-    print("照片加边框工具已启动")
-    print(f"  {url}")
-    print("  Ctrl-C 退出")
-    print("  photo-framer  Copyright (C) 2026 QuincyLeo  ·  GPL-3.0-or-later, 无任何担保\n")
-    if "--no-browser" not in sys.argv:
-        threading.Timer(0.4, webbrowser.open, (url,)).start()
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n已退出")
-    return 0
+
+# The command-line app also backs the original Handler and module-level API.
+APPLICATION = ServerApplication()
+HERE = APPLICATION.root
+STATIC = APPLICATION.static
+TOKEN = APPLICATION.token
+SESSIONS = APPLICATION.sessions
+JOBS = APPLICATION.jobs
+CACHE_DIR = APPLICATION.cache.directory
+STAGED_NAME = UploadCache.STAGED_NAME
+MAX_UPLOAD = Handler.MAX_UPLOAD
+MAX_SESSIONS = SessionStore.MAX_SESSIONS
+PREVIEW_LONG_SIDE = SessionStore.PREVIEW_LONG_SIDE
+CONTENT_TYPES = Handler.CONTENT_TYPES
+MIME_FOR_FORMAT = Handler.MIME_FOR_FORMAT
+session_summary = SessionStore.summary
+native_pick = NativeDialogs.pick
+reveal = NativeDialogs.reveal
+sweep_cache = APPLICATION.cache.sweep
+list_images = JobRegistry.list_images
+_ascii_name = Handler._ascii_name
+main = APPLICATION.run
 
 
 if __name__ == "__main__":

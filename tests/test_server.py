@@ -253,6 +253,31 @@ def main():
     check("batch rejects a bad folder", status == 404)
     check("unknown job reports 404", call("/api/batch?job=zzz")[0] == 404)
 
+    # An explicitly created application keeps its token and state separate.
+    application = srv.ServerApplication()
+    isolated = application.create_server(("127.0.0.1", 0))
+    threading.Thread(target=isolated.serve_forever, daemon=True).start()
+    original_base = BASE
+    BASE = f"http://127.0.0.1:{isolated.server_address[1]}"
+    try:
+        check("a separate app rejects the default app's token",
+              call("/api/defaults", {})[0] == 403)
+        check("a separate app accepts its own token",
+              call("/api/defaults", {}, token=application.token)[0] == 200)
+        status, body, _ = call("/")
+        check("a separate app injects its own token into the page",
+              status == 200 and application.token.encode() in body
+              and srv.TOKEN.encode() not in body)
+        check("sessions do not leak between applications",
+              call("/api/preview", {"id": session_id, "params": params},
+                   token=application.token)[0] == 404)
+        check("batch jobs do not leak between applications",
+              call(f"/api/batch?job={job['id']}", token=application.token)[0] == 404)
+    finally:
+        BASE = original_base
+        isolated.shutdown()
+        isolated.server_close()
+
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

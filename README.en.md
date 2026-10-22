@@ -51,9 +51,17 @@ Your browser opens on `http://127.0.0.1:8787/?t=…`. Closing the terminal
 shuts it down.
 
 Pillow (≥ 10) is the only dependency; `start.command` installs it if it is
-missing. The font paths and the native file picker are macOS-specific — on
-another platform you will need to change the font constants in `FontBook` in
-`framer.py` and `native_pick()` in `server.py`.
+missing.
+
+There are no fonts to install. On macOS the caption is set in the system's
+own faces, so it looks like it belongs there; everywhere else it is set in
+the open faces that travel with the program, which cover Latin and Chinese
+alike.
+
+The two picker buttons — 选择照片 (pick a photo) and 选择文件夹 (pick a
+folder) — open macOS's own dialogs, and for now only work there. On another
+platform you can still drag a photo onto the page to start; batch processing
+is the part you cannot reach.
 
 The interface itself is in Chinese only; where this document names a button
 it gives the label followed by an English gloss.
@@ -210,12 +218,11 @@ In actual pixels (one line, size 1.0×):
 
 ### Chinese text
 
-SF Pro carries no CJK glyphs, so Chinese typed into the caption would come
-out as a row of placeholder boxes. The tool checks each character against the
-primary face (by rendering it and comparing against a code point no font
-defines) and falls back to Hiragino Sans GB for the ones it lacks — W3 and
-W6 standing in for regular and semibold. Mixed Latin and Chinese share a
-single baseline.
+Chinese typed into the caption does not come out as a row of placeholder
+boxes. Wherever the Latin face lacks a character, that one character is set
+in the Chinese face instead, and the two still share a single baseline and
+follow the caption's own weight. The Chinese face is the system's own gothic
+on macOS, and the bundled open one everywhere else.
 
 ### Letter spacing
 

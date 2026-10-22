@@ -18,6 +18,7 @@ import io
 import math
 import os
 import re
+import sys
 from dataclasses import asdict, dataclass, fields
 
 from PIL import (
@@ -472,37 +473,80 @@ def resolve_mark(params, values, title="", texts=None):
 # drawing primitives
 # --------------------------------------------------------------------------
 
-MISSING_CHAR = "\ue000"   # private use area: no font defines it
-Z_MARK = "\ue001"         # ... and here it stands in for Nikon's barred Z
+# Stands in for the barred Z Nikon writes on its mirrorless bodies, so the
+# letter can be swapped for a drawn glyph while the caption is still a plain
+# string.  NikonZ.marked puts it in and plan_text takes it out again.
+Z_MARK = "\ue001"
 
 
 class FontBook:
     """The faces the caption is set in, kept open and measured once.
 
-    SF Pro is a variable font, so one file answers every weight; Arial stands
-    in where it is missing, and Hiragino carries the CJK glyphs SF Pro has
-    none of.  Opening a face is expensive and the info bar measures the same
-    band up to six times per render, so every face is cached by size and
-    weight.
+    On a Mac the caption is set in the system's own faces, which is what
+    makes it look like it belongs there: SF Pro is a variable font, so one
+    file answers every weight, and Hiragino carries the CJK glyphs SF Pro has
+    none of.  Neither may be redistributed, so everywhere else the two open
+    faces in assets/fonts stand in -- Inter for the Latin text, Noto Sans SC
+    for the Chinese.  Those travel with the program, so a caption renders the
+    same whether or not the machine happens to have any fonts of its own.
+
+    Which set is in use is settled once, in __init__, and everything below
+    reads it out of `self.faces`.  The sets cannot be collapsed into one by
+    pointing the same paths somewhere else, because the two do not take a
+    weight the same way -- see _face.
+
+    Opening a face is expensive and the info bar measures the same band up to
+    six times per render, so every face is cached by size and weight.
 
     There is one book -- FONTS, just below -- for the life of the process.  A
-    second one would re-open SFNS.ttf and re-run `set_variation_by_name` on
-    every measurement, which is why there is no way to ask for a private
+    second one would re-open the variable face and re-run the weight lookup
+    on every measurement, which is why there is no way to ask for a private
     cache.
     """
 
-    SF_FONT = "/System/Library/Fonts/SFNS.ttf"
-    CJK_FONT = "/System/Library/Fonts/Hiragino Sans GB.ttc"
-    CJK_FACES = {"light": 0, "bold": 2}      # Hiragino Sans GB W3 / W6
-    ARIAL = "/System/Library/Fonts/Supplemental/Arial.ttf"
-    ARIAL_BOLD = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+    @dataclass(frozen=True)
+    class FaceSet:
+        """One platform's pair of faces, and how each is asked for a weight."""
+
+        sans: str
+        cjk: str
+        cjk_faces: tuple = (0, 0)   # collection index for the light / bold face
+        by_name: bool = False       # weight as an instance name, not an axis
+
+    FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets", "fonts")
+
+    APPLE = FaceSet(sans="/System/Library/Fonts/SFNS.ttf",
+                    cjk="/System/Library/Fonts/Hiragino Sans GB.ttc",
+                    cjk_faces=(0, 2),      # Hiragino Sans GB W3 / W6
+                    by_name=True)
+    OPEN = FaceSet(sans=os.path.join(FONT_DIR, "Inter-Variable.ttf"),
+                   cjk=os.path.join(FONT_DIR, "NotoSansSC-Variable.ttf"))
+
+    # The weights the caption asks for, and where each one stands on the
+    # `wght` axis.  The numbers are only consulted for the open faces; SF Pro
+    # is asked by name, because its own instances do not sit on this grid.
+    WEIGHTS = {"Ultralight": 100, "Thin": 200, "Light": 300, "Regular": 400,
+               "Medium": 500, "Semibold": 600, "Bold": 700, "Heavy": 800,
+               "Black": 900}
     HEAVY_WEIGHTS = ("Medium", "Semibold", "Bold", "Heavy", "Black")
 
-    WEIGHTS = ["Ultralight", "Thin", "Light", "Regular", "Medium", "Semibold",
-               "Bold", "Heavy", "Black"]
+    # What `covers` renders to find out what this face's .notdef looks like.
+    # A Unicode noncharacter, permanently unassigned, so no face can have a
+    # glyph for it.  The private use area will not do: it is unassigned only
+    # in the sense that fonts may put whatever they like there, and Inter
+    # does exactly that at U+E000.
+    NOTDEF_PROBE = "﷐"
 
     def __init__(self):
         self._cache = {}
+        # Settled once.  An Apple face is only worth looking for on an Apple
+        # system, and if SFNS.ttf is not where it has always been then this
+        # is a stripped install -- not something to re-probe on every one of
+        # the thousands of measurements a render makes.
+        self.faces = self.APPLE if (sys.platform == "darwin"
+                                    and os.path.exists(self.APPLE.sans)) \
+            else self.OPEN
 
     def sans(self, size, weight="Regular"):
         size = max(1, int(round(size)))
@@ -510,34 +554,95 @@ class FontBook:
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        font = None
-        try:
-            font = ImageFont.truetype(self.SF_FONT, size)
-            font.set_variation_by_name(weight if weight in self.WEIGHTS else "Regular")
-        except Exception:
-            try:
-                font = ImageFont.truetype(
-                    self.ARIAL_BOLD if weight in self.HEAVY_WEIGHTS else self.ARIAL,
-                    size)
-            except Exception:
-                font = ImageFont.load_default()
+        font = self._face(self.faces.sans, size, weight)
+        if font is None:
+            font = self._last_resort(size)
         self._cache[key] = font
         return font
 
     def cjk(self, size, weight="Regular"):
-        """SF Pro carries no CJK glyphs, so Chinese text needs a second face."""
+        """Neither Latin face carries CJK glyphs, so Chinese needs a second one."""
         size = max(1, int(round(size)))
-        key = ("cjk", size, weight in self.HEAVY_WEIGHTS)
+        heavy = weight in self.HEAVY_WEIGHTS
+        key = ("cjk", size, heavy)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-        face = self.CJK_FACES["bold" if weight in self.HEAVY_WEIGHTS else "light"]
-        try:
-            font = ImageFont.truetype(self.CJK_FONT, size, index=face)
-        except Exception:
+        # Hiragino offers two usable faces, so the caption has only ever
+        # asked for one of two bands.  Noto is held to the same two, both to
+        # keep the platforms looking alike and because the cache key above
+        # already collapses everything else onto them.
+        font = self._face(self.faces.cjk, size, "Bold" if heavy else "Regular",
+                          index=self.faces.cjk_faces[heavy])
+        if font is None:
             font = self.sans(size, weight)
         self._cache[key] = font
         return font
+
+    def _face(self, path, size, weight, index=0):
+        """Open one face standing at `weight`, or None if the file is absent.
+
+        This is the one place the two sets genuinely differ, and the reason
+        the choice cannot be reduced to swapping the paths over.  SF Pro's
+        instances are named exactly as the caption asks for them, so the name
+        goes straight in -- and has to, because those names do not sit on the
+        standard axis grid: its Semibold is a little lighter than wght 600,
+        its Ultralight far lighter than 100, and its weight is the fourth of
+        four axes rather than the only one.  Inter and Noto Sans SC spell
+        their instances differently and omit some outright ("SemiBold", no
+        "Heavy" at all), so there the `wght` axis is set by number instead;
+        it also cannot be left alone, since Noto Sans SC's own default is
+        Thin and an untouched face would set the caption in hairlines.  Every
+        other axis -- Inter's optical size -- keeps its default, and the
+        order they come in is read off the face rather than assumed, because
+        putting the weight in the wrong slot would set the optical size to
+        600 and the weight to nothing.  Hiragino is not variable at all and
+        answers only to the face index it was opened with.
+        """
+        try:
+            font = ImageFont.truetype(path, size, index=index)
+        except Exception:
+            return None
+        if self.faces.by_name:
+            try:
+                font.set_variation_by_name(
+                    weight if weight in self.WEIGHTS else "Regular")
+            except Exception:
+                pass        # static face: the index already chose the weight
+            return font
+        try:
+            axes = font.get_variation_axes()
+        except Exception:
+            return font     # static face: its weight is already decided
+        target = self.WEIGHTS.get(weight, self.WEIGHTS["Regular"])
+        values = []
+        for axis in axes:
+            name = axis.get("name") or b""
+            if isinstance(name, bytes):
+                name = name.decode("ascii", "ignore")
+            if name.strip().lower() in ("weight", "wght"):
+                values.append(min(max(target, axis["minimum"]), axis["maximum"]))
+            else:
+                values.append(axis["default"])
+        try:
+            font.set_variation_by_axes(values)
+        except Exception:
+            pass
+        return font
+
+    @staticmethod
+    def _last_resort(size):
+        """Pillow's built-in face, for when assets/fonts has been emptied.
+
+        Asked for without a size it hands back a fixed 10px bitmap, which
+        would set a 100-megapixel photo's caption in glyphs too small to see
+        rather than visibly failing, so the size is passed through wherever
+        Pillow is new enough to take it.
+        """
+        try:
+            return ImageFont.load_default(size)
+        except TypeError:
+            return ImageFont.load_default()
 
     def covers(self, font, char):
         """Whether `font` has a real glyph for `char`.
@@ -551,7 +656,7 @@ class FontBook:
         notdef = getattr(font, "_notdef_bitmap", None)
         if notdef is None:
             try:
-                notdef = bytes(font.getmask(MISSING_CHAR, mode="L"))
+                notdef = bytes(font.getmask(self.NOTDEF_PROBE, mode="L"))
             except Exception:
                 notdef = b""
             try:

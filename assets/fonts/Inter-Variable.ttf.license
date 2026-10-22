@@ -1,0 +1,6 @@
+SPDX-FileCopyrightText: 2020 The Inter Project Authors (https://github.com/rsms/inter)
+SPDX-License-Identifier: OFL-1.1
+
+Inter, a variable font shipped unmodified from the Google Fonts release of
+Inter[opsz,wght].ttf and only renamed.  It sets the caption's Latin text
+wherever SF Pro is not available.  The licence text is in OFL.txt beside it.
